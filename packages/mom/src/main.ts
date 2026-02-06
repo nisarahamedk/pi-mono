@@ -235,7 +235,9 @@ function createSlackContext(
 		},
 
 		uploadFile: async (filePath: string, title?: string) => {
-			await slack.uploadFile(event.channel, filePath, title);
+			// Ensure uploads end up in the same thread as the main response.
+			// DMs do not use threads for uploads.
+			await slack.uploadFile(event.channel, filePath, title, isDm ? undefined : threadTs);
 		},
 
 		setWorking: async (working: boolean) => {

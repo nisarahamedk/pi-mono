@@ -222,11 +222,22 @@ export class SlackBot {
 		return result.ts as string;
 	}
 
-	async uploadFile(channel: string, filePath: string, title?: string): Promise<void> {
+	async uploadFile(channel: string, filePath: string, title?: string, threadTs?: string): Promise<void> {
 		const fileName = title || basename(filePath);
 		const fileContent = readFileSync(filePath);
+		if (threadTs) {
+			await this.webClient.files.uploadV2({
+				channels: channel,
+				thread_ts: threadTs,
+				file: fileContent,
+				filename: fileName,
+				title: fileName,
+			});
+			return;
+		}
+
 		await this.webClient.files.uploadV2({
-			channel_id: channel,
+			channels: channel,
 			file: fileContent,
 			filename: fileName,
 			title: fileName,
