@@ -188,7 +188,7 @@ function buildSystemPrompt(
 			: sandboxConfig.type === "vibesilo"
 				? `You are running inside a Docker container (vibesilo sandbox; image configured in settings.json).
 - Bash working directory: / (use cd or absolute paths)
-- Outbound network is restricted by settings.json vibesilo.allowNet
+- Network access may be restricted. Prefer trying the request; if blocked, use the error output to adjust your approach.
 - Secret placeholders may be injected via environment variables (same names as configured secrets). Do not print secret values.
 - Install tools via the image's package manager (typically apt)
 - Your changes persist for the lifetime of this mom process`
