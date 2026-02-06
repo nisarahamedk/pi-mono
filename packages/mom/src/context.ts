@@ -12,7 +12,7 @@
 
 import type { UserMessage } from "@mariozechner/pi-ai";
 import type { SessionManager, SessionMessageEntry } from "@mariozechner/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
 // ============================================================================
@@ -165,12 +165,29 @@ export interface MomRetrySettings {
 	baseDelayMs: number;
 }
 
+export interface MomBranchSummarySettings {
+	reserveTokens: number;
+}
+
+export interface MomImageSettings {
+	autoResize: boolean;
+	blockImages: boolean;
+}
+
 export interface MomSettings {
 	defaultProvider?: string;
 	defaultModel?: string;
 	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high";
+	theme?: string;
+	shellCommandPrefix?: string;
+	branchSummary?: Partial<MomBranchSummarySettings>;
+	images?: Partial<MomImageSettings>;
 	compaction?: Partial<MomCompactionSettings>;
 	retry?: Partial<MomRetrySettings>;
+	postUsageSummaryToSlack?: boolean;
+	postToolDetailsToSlack?: boolean;
+	autoTriggerChannels?: boolean;
+	autoTriggerChannelUserIds?: string[];
 }
 
 const DEFAULT_COMPACTION: MomCompactionSettings = {
@@ -185,6 +202,15 @@ const DEFAULT_RETRY: MomRetrySettings = {
 	baseDelayMs: 2000,
 };
 
+const DEFAULT_BRANCH_SUMMARY: MomBranchSummarySettings = {
+	reserveTokens: 16384,
+};
+
+const DEFAULT_IMAGES: MomImageSettings = {
+	autoResize: true,
+	blockImages: false,
+};
+
 /**
  * Settings manager for mom.
  * Stores settings in the workspace root directory.
@@ -192,6 +218,7 @@ const DEFAULT_RETRY: MomRetrySettings = {
 export class MomSettingsManager {
 	private settingsPath: string;
 	private settings: MomSettings;
+	private settingsMtimeMs: number | undefined;
 
 	constructor(workspaceDir: string) {
 		this.settingsPath = join(workspaceDir, "settings.json");
@@ -200,15 +227,56 @@ export class MomSettingsManager {
 
 	private load(): MomSettings {
 		if (!existsSync(this.settingsPath)) {
+			this.settingsMtimeMs = undefined;
 			return {};
+		}
+
+		let mtimeMs: number | undefined;
+		try {
+			mtimeMs = statSync(this.settingsPath).mtimeMs;
+		} catch {
+			mtimeMs = undefined;
 		}
 
 		try {
 			const content = readFileSync(this.settingsPath, "utf-8");
-			return JSON.parse(content);
+			const parsed = JSON.parse(content) as MomSettings;
+			this.settingsMtimeMs = mtimeMs;
+			return parsed;
 		} catch {
+			// Keep tracking mtime even if JSON is invalid, so we can retry on edits.
+			this.settingsMtimeMs = mtimeMs;
 			return {};
 		}
+	}
+
+	reload(): void {
+		this.settings = this.load();
+	}
+
+	reloadIfChanged(): boolean {
+		if (!existsSync(this.settingsPath)) {
+			if (this.settingsMtimeMs !== undefined) {
+				this.settingsMtimeMs = undefined;
+				this.settings = {};
+				return true;
+			}
+			return false;
+		}
+
+		let mtimeMs: number | undefined;
+		try {
+			mtimeMs = statSync(this.settingsPath).mtimeMs;
+		} catch {
+			mtimeMs = undefined;
+		}
+
+		if (mtimeMs !== undefined && this.settingsMtimeMs === mtimeMs) {
+			return false;
+		}
+
+		this.reload();
+		return true;
 	}
 
 	private save(): void {
@@ -293,6 +361,85 @@ export class MomSettingsManager {
 
 	setFollowUpMode(_mode: "all" | "one-at-a-time"): void {
 		// No-op for mom
+	}
+
+	getTheme(): string | undefined {
+		return this.settings.theme;
+	}
+
+	setTheme(theme: string): void {
+		this.settings.theme = theme;
+		this.save();
+	}
+
+	getShellCommandPrefix(): string | undefined {
+		return this.settings.shellCommandPrefix;
+	}
+
+	setShellCommandPrefix(prefix: string | undefined): void {
+		this.settings.shellCommandPrefix = prefix;
+		this.save();
+	}
+
+	getBranchSummarySettings(): MomBranchSummarySettings {
+		return {
+			...DEFAULT_BRANCH_SUMMARY,
+			...this.settings.branchSummary,
+		};
+	}
+
+	getImageAutoResize(): boolean {
+		return this.settings.images?.autoResize ?? DEFAULT_IMAGES.autoResize;
+	}
+
+	setImageAutoResize(enabled: boolean): void {
+		this.settings.images = { ...this.settings.images, autoResize: enabled };
+		this.save();
+	}
+
+	getBlockImages(): boolean {
+		return this.settings.images?.blockImages ?? DEFAULT_IMAGES.blockImages;
+	}
+
+	setBlockImages(blocked: boolean): void {
+		this.settings.images = { ...this.settings.images, blockImages: blocked };
+		this.save();
+	}
+
+	getPostUsageSummaryToSlack(): boolean {
+		return this.settings.postUsageSummaryToSlack ?? false;
+	}
+
+	setPostUsageSummaryToSlack(enabled: boolean): void {
+		this.settings.postUsageSummaryToSlack = enabled;
+		this.save();
+	}
+
+	getPostToolDetailsToSlack(): boolean {
+		return this.settings.postToolDetailsToSlack ?? false;
+	}
+
+	setPostToolDetailsToSlack(enabled: boolean): void {
+		this.settings.postToolDetailsToSlack = enabled;
+		this.save();
+	}
+
+	getAutoTriggerChannels(): boolean {
+		return this.settings.autoTriggerChannels ?? false;
+	}
+
+	setAutoTriggerChannels(enabled: boolean): void {
+		this.settings.autoTriggerChannels = enabled;
+		this.save();
+	}
+
+	getAutoTriggerChannelUserIds(): string[] | undefined {
+		return this.settings.autoTriggerChannelUserIds;
+	}
+
+	setAutoTriggerChannelUserIds(userIds: string[] | undefined): void {
+		this.settings.autoTriggerChannelUserIds = userIds;
+		this.save();
 	}
 
 	getHookPaths(): string[] {

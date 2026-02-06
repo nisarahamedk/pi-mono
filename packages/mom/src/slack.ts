@@ -2,6 +2,7 @@ import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
+import { MomSettingsManager } from "./context.js";
 import * as log from "./log.js";
 import type { Attachment, ChannelStore } from "./store.js";
 
@@ -136,6 +137,7 @@ export class SlackBot {
 	private handler: MomHandler;
 	private workingDir: string;
 	private store: ChannelStore;
+	private settingsManager: MomSettingsManager;
 	private botUserId: string | null = null;
 	private startupTs: string | null = null; // Messages older than this are just logged, not processed
 
@@ -150,6 +152,7 @@ export class SlackBot {
 		this.handler = handler;
 		this.workingDir = config.workingDir;
 		this.store = config.store;
+		this.settingsManager = new MomSettingsManager(this.workingDir);
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
 	}
@@ -172,6 +175,15 @@ export class SlackBot {
 
 		// Record startup time - messages older than this are just logged, not processed
 		this.startupTs = (Date.now() / 1000).toFixed(6);
+
+		this.settingsManager.reloadIfChanged();
+		if (this.settingsManager.getAutoTriggerChannels()) {
+			const allow = this.settingsManager.getAutoTriggerChannelUserIds();
+			log.logInfo(
+				`Auto-trigger in channels enabled` +
+					(allow && allow.length > 0 ? ` (user allowlist: ${allow.join(", ")})` : " (no user allowlist)"),
+			);
+		}
 
 		log.logConnected();
 	}
@@ -332,7 +344,8 @@ export class SlackBot {
 
 			// SYNC: Check if busy
 			if (this.handler.isRunning(e.channel)) {
-				this.postMessage(e.channel, "_Already working. Say `@mom stop` to cancel._");
+				const threadRoot = e.thread_ts ?? e.ts;
+				this.postInThread(e.channel, threadRoot, "_Already working. Say `@mom stop` to cancel._");
 			} else {
 				this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 			}
@@ -353,6 +366,8 @@ export class SlackBot {
 				bot_id?: string;
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
+
+			this.settingsManager.reloadIfChanged();
 
 			// Skip bot messages, edits, etc.
 			if (e.bot_id || !e.user || e.user === this.botUserId) {
@@ -398,7 +413,13 @@ export class SlackBot {
 				return;
 			}
 
-			// Only trigger handler for DMs
+			const autoTriggerChannels = !isDM && this.settingsManager.getAutoTriggerChannels();
+			const autoTriggerUserIds = this.settingsManager.getAutoTriggerChannelUserIds();
+			const autoTriggerUserAllowed =
+				autoTriggerChannels &&
+				(!autoTriggerUserIds || autoTriggerUserIds.length === 0 || autoTriggerUserIds.includes(e.user));
+
+			// Trigger handler for DMs
 			if (isDM) {
 				// Check for stop command - execute immediately, don't queue!
 				if (slackEvent.text.toLowerCase().trim() === "stop") {
@@ -413,6 +434,26 @@ export class SlackBot {
 
 				if (this.handler.isRunning(e.channel)) {
 					this.postMessage(e.channel, "_Already working. Say `stop` to cancel._");
+				} else {
+					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
+				}
+			} else if (autoTriggerUserAllowed) {
+				// Auto-trigger in channels: top-level messages start a thread, thread replies continue it.
+				const threadRoot = e.thread_ts ?? e.ts;
+
+				// Stop command in channels (if auto-triggering): execute immediately, don't queue!
+				if (slackEvent.text.toLowerCase().trim() === "stop") {
+					if (this.handler.isRunning(e.channel)) {
+						this.handler.handleStop(e.channel, this); // Don't await, don't queue
+					} else {
+						this.postInThread(e.channel, threadRoot, "_Nothing running_");
+					}
+					ack();
+					return;
+				}
+
+				if (this.handler.isRunning(e.channel)) {
+					this.postInThread(e.channel, threadRoot, "_Already working. Say `@mom stop` to cancel._");
 				} else {
 					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 				}

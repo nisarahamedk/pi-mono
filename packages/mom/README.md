@@ -62,9 +62,9 @@ npm install @mariozechner/pi-mom
 # Set environment variables
 export MOM_SLACK_APP_TOKEN=xapp-...
 export MOM_SLACK_BOT_TOKEN=xoxb-...
-# Option 1: Anthropic API key
-export ANTHROPIC_API_KEY=sk-ant-...
-# Option 2: use /login command in pi agent, then copy/link auth.json to ~/.pi/mom/
+# Option 1: set a provider API key (example)
+export OPENAI_API_KEY=sk-...
+# Option 2: use /login in pi coding-agent (recommended for subscriptions like openai-codex), then link auth.json to ~/.pi/mom/
 
 # Create Docker sandbox (recommended)
 docker run -d \
@@ -95,24 +95,37 @@ Options:
 |----------|-------------|
 | `MOM_SLACK_APP_TOKEN` | Slack app-level token (xapp-...) |
 | `MOM_SLACK_BOT_TOKEN` | Slack bot token (xoxb-...) |
-| `ANTHROPIC_API_KEY` | (Optional) Anthropic API key |
+| `OPENAI_API_KEY` | (Optional) OpenAI API key (provider: `openai`) |
+| `ANTHROPIC_API_KEY` | (Optional) Anthropic API key (provider: `anthropic`) |
+| `GEMINI_API_KEY` | (Optional) Google Gemini API key (provider: `google`) |
 
 ## Authentication
 
-Mom needs credentials for Anthropic API. The options to set it are:
+Mom supports the same providers as `@mariozechner/pi-ai` / `@mariozechner/pi-coding-agent`.
 
-1. **Environment Variable**
+You can authenticate in two ways:
+
+1. **Environment Variables (API-key providers)**
+
 ```bash
+export OPENAI_API_KEY=sk-...
+# or
 export ANTHROPIC_API_KEY=sk-ant-...
+# or
+export GEMINI_API_KEY=...
 ```
 
-2. **OAuth Login via coding agent command** (Recommended for Claude Pro/Max)
+2. **OAuth Login via the coding agent (recommended for subscriptions)**
 
-- run interactive coding agent session: `npx @mariozechner/pi-coding-agent`
-- enter `/login` command
-  - choose "Anthropic" provider
-  - follow instructions in the browser
-- link `auth.json` to mom: `ln -s ~/.pi/agent/auth.json ~/.pi/mom/auth.json`
+This is required for providers like `openai-codex` (ChatGPT Plus/Pro Codex subscription), and also works for other OAuth providers.
+
+- run an interactive coding agent session: `npx @mariozechner/pi-coding-agent`
+- run `/login <provider>` (examples: `/login openai-codex`, `/login github-copilot`, `/login anthropic`)
+- link `auth.json` to mom (mom reads `~/.pi/mom/auth.json`):
+
+```bash
+ln -s ~/.pi/agent/auth.json ~/.pi/mom/auth.json
+```
 
 ## How Mom Works
 

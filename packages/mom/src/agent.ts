@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import { getModel, type ImageContent } from "@mariozechner/pi-ai";
+import type { Api, ImageContent, Model } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	AuthStorage,
@@ -23,8 +23,41 @@ import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
 import type { ChannelStore } from "./store.js";
 import { createMomTools, setUploadFunction } from "./tools/index.js";
 
-// Hardcoded model for now - TODO: make configurable (issue #63)
-const model = getModel("anthropic", "claude-sonnet-4-5");
+const DEFAULT_PROVIDER_PREFERENCE = [
+	"openai-codex",
+	"github-copilot",
+	"openai",
+	"anthropic",
+	"google",
+	"groq",
+	"openrouter",
+	"amazon-bedrock",
+	"opencode",
+] as const;
+
+function resolveModelFromConfig(
+	modelRegistry: ModelRegistry,
+	ref: { provider: string; modelId: string } | null | undefined,
+): Model<Api> | undefined {
+	if (!ref) return undefined;
+	const model = modelRegistry.find(ref.provider, ref.modelId);
+	if (!model) return undefined;
+	// Fast check: does auth exist at all? (does not refresh OAuth)
+	if (!modelRegistry.authStorage.hasAuth(model.provider)) return undefined;
+	return model;
+}
+
+function resolvePreferredAvailableModel(modelRegistry: ModelRegistry): Model<Api> | undefined {
+	const available = modelRegistry.getAvailable();
+	if (available.length === 0) return undefined;
+
+	for (const provider of DEFAULT_PROVIDER_PREFERENCE) {
+		const match = available.find((m) => m.provider === provider);
+		if (match) return match;
+	}
+
+	return available[0];
+}
 
 export interface PendingMessage {
 	userName: string;
@@ -40,18 +73,6 @@ export interface AgentRunner {
 		pendingMessages?: PendingMessage[],
 	): Promise<{ stopReason: string; errorMessage?: string }>;
 	abort(): void;
-}
-
-async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
-	const key = await authStorage.getApiKey("anthropic");
-	if (!key) {
-		throw new Error(
-			"No API key found for anthropic.\n\n" +
-				"Set an API key environment variable, or use /login with Anthropic and link to auth.json from " +
-				join(homedir(), ".pi", "mom", "auth.json"),
-		);
-	}
-	return key;
 }
 
 const IMAGE_MIME_TYPES: Record<string, string> = {
@@ -451,20 +472,48 @@ function createRunner(
 	const authStorage = AuthStorage.create(join(homedir(), ".pi", "mom", "auth.json"));
 	const modelRegistry = new ModelRegistry(authStorage);
 
+	// Load existing messages (also contains last selected model/thinking level)
+	const loadedSession = sessionManager.buildSessionContext();
+
+	// Resolve model selection (priority: session -> settings -> first available)
+	const sessionModel = resolveModelFromConfig(modelRegistry, loadedSession.model);
+	const settingsProvider = settingsManager.getDefaultProvider();
+	const settingsModelId = settingsManager.getDefaultModel();
+	const settingsModel = resolveModelFromConfig(
+		modelRegistry,
+		settingsProvider && settingsModelId ? { provider: settingsProvider, modelId: settingsModelId } : undefined,
+	);
+	const availableModel = resolvePreferredAvailableModel(modelRegistry);
+
+	const selectedModel = sessionModel ?? settingsModel ?? availableModel;
+
+	if (selectedModel) {
+		log.logInfo(`[${channelId}] Using model ${selectedModel.provider}/${selectedModel.id}`);
+		// Persist selection for brand new thread sessions so future runs stay stable.
+		if (!loadedSession.model) {
+			sessionManager.appendModelChange(selectedModel.provider, selectedModel.id);
+			settingsManager.setDefaultModelAndProvider(selectedModel.provider, selectedModel.id);
+		}
+	} else {
+		log.logWarning(
+			`[${channelId}] No model available (no API keys/OAuth configured).` +
+				` Configure credentials (e.g. via pi-coding-agent /login) and link auth.json to ~/.pi/mom/auth.json.`,
+		);
+	}
+
 	// Create agent
 	const agent = new Agent({
 		initialState: {
 			systemPrompt,
-			model,
+			...(selectedModel ? { model: selectedModel } : {}),
 			thinkingLevel: "off",
 			tools,
 		},
+		sessionId: sessionManager.getSessionId(),
 		convertToLlm,
-		getApiKey: async () => getAnthropicApiKey(authStorage),
+		getApiKey: (provider) => authStorage.getApiKey(provider),
 	});
 
-	// Load existing messages
-	const loadedSession = sessionManager.buildSessionContext();
 	if (loadedSession.messages.length > 0) {
 		agent.replaceMessages(loadedSession.messages);
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
@@ -535,7 +584,9 @@ function createRunner(
 			});
 
 			log.logToolStart(logCtx, agentEvent.toolName, label, agentEvent.args as Record<string, unknown>);
-			queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
+			if (settingsManager.getPostToolDetailsToSlack()) {
+				queue.enqueue(() => ctx.respond(`_→ ${label}_`, false), "tool label");
+			}
 		} else if (event.type === "tool_execution_end") {
 			const agentEvent = event as AgentEvent & { type: "tool_execution_end" };
 			const resultStr = extractToolResultText(agentEvent.result);
@@ -550,19 +601,21 @@ function createRunner(
 				log.logToolSuccess(logCtx, agentEvent.toolName, durationMs, resultStr);
 			}
 
-			// Post args + result to thread
-			const label = pending?.args ? (pending.args as { label?: string }).label : undefined;
-			const argsFormatted = pending
-				? formatToolArgsForSlack(agentEvent.toolName, pending.args as Record<string, unknown>)
-				: "(args not found)";
-			const duration = (durationMs / 1000).toFixed(1);
-			let threadMessage = `*${agentEvent.isError ? "✗" : "✓"} ${agentEvent.toolName}*`;
-			if (label) threadMessage += `: ${label}`;
-			threadMessage += ` (${duration}s)\n`;
-			if (argsFormatted) threadMessage += `\`\`\`\n${argsFormatted}\n\`\`\`\n`;
-			threadMessage += `*Result:*\n\`\`\`\n${resultStr}\n\`\`\``;
+			// Post args + result to thread (optional)
+			if (settingsManager.getPostToolDetailsToSlack()) {
+				const label = pending?.args ? (pending.args as { label?: string }).label : undefined;
+				const argsFormatted = pending
+					? formatToolArgsForSlack(agentEvent.toolName, pending.args as Record<string, unknown>)
+					: "(args not found)";
+				const duration = (durationMs / 1000).toFixed(1);
+				let threadMessage = `*${agentEvent.isError ? "✗" : "✓"} ${agentEvent.toolName}*`;
+				if (label) threadMessage += `: ${label}`;
+				threadMessage += ` (${duration}s)\n`;
+				if (argsFormatted) threadMessage += `\`\`\`\n${argsFormatted}\n\`\`\`\n`;
+				threadMessage += `*Result:*\n\`\`\`\n${resultStr}\n\`\`\``;
 
-			queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+				queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
+			}
 
 			if (agentEvent.isError) {
 				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
@@ -859,11 +912,15 @@ function createRunner(
 						lastAssistantMessage.usage.cacheRead +
 						lastAssistantMessage.usage.cacheWrite
 					: 0;
-				const contextWindow = model.contextWindow || 200000;
+				const contextWindow = session.model?.contextWindow ?? 200000;
 
 				const summary = log.logUsageSummary(runState.logCtx!, runState.totalUsage, contextTokens, contextWindow);
-				runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
-				await queueChain;
+
+				// Default: do not post cost breakdown to Slack. Still log it to console.
+				if (settingsManager.getPostUsageSummaryToSlack()) {
+					runState.queue.enqueue(() => ctx.respondInThread(summary), "usage summary");
+					await queueChain;
+				}
 			}
 
 			// Clear run state
