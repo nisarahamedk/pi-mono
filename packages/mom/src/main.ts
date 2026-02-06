@@ -5,6 +5,7 @@ import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
+import { startRpcServer } from "./rpc-server.js";
 import { parseSandboxArg, type SandboxConfig, shutdownSandbox, validateSandbox } from "./sandbox.js";
 import { type MomHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
 import { ChannelStore } from "./store.js";
@@ -20,6 +21,7 @@ interface ParsedArgs {
 	workingDir?: string;
 	sandbox: SandboxConfig;
 	downloadChannel?: string;
+	rpcSocket?: string;
 }
 
 function parseArgs(): ParsedArgs {
@@ -27,6 +29,7 @@ function parseArgs(): ParsedArgs {
 	let sandbox: SandboxConfig = { type: "host" };
 	let workingDir: string | undefined;
 	let downloadChannelId: string | undefined;
+	let rpcSocket: string | undefined;
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -38,6 +41,10 @@ function parseArgs(): ParsedArgs {
 			downloadChannelId = arg.slice("--download=".length);
 		} else if (arg === "--download") {
 			downloadChannelId = args[++i];
+		} else if (arg.startsWith("--rpc-socket=")) {
+			rpcSocket = arg.slice("--rpc-socket=".length);
+		} else if (arg === "--rpc-socket") {
+			rpcSocket = args[++i] || "";
 		} else if (!arg.startsWith("-")) {
 			workingDir = arg;
 		}
@@ -47,6 +54,7 @@ function parseArgs(): ParsedArgs {
 		workingDir: workingDir ? resolve(workingDir) : undefined,
 		sandbox,
 		downloadChannel: downloadChannelId,
+		rpcSocket,
 	};
 }
 
@@ -69,9 +77,15 @@ if (!parsedArgs.workingDir) {
 	process.exit(1);
 }
 
-const { workingDir, sandbox } = { workingDir: parsedArgs.workingDir, sandbox: parsedArgs.sandbox };
+const { workingDir, sandbox, rpcSocket } = {
+	workingDir: parsedArgs.workingDir,
+	sandbox: parsedArgs.sandbox,
+	rpcSocket: parsedArgs.rpcSocket,
+};
 
-if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
+const rpcOnly = rpcSocket !== undefined && (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN);
+
+if (!rpcOnly && (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN)) {
 	console.error("Missing env: MOM_SLACK_APP_TOKEN, MOM_SLACK_BOT_TOKEN");
 	process.exit(1);
 }
@@ -98,7 +112,7 @@ function getState(channelId: string): ChannelState {
 		state = {
 			running: false,
 			activeRunner: null,
-			store: new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN! }),
+			store: new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN ?? "" }),
 			stopRequested: false,
 		};
 		channelStates.set(channelId, state);
@@ -365,18 +379,22 @@ log.logStartup(
 );
 
 // Shared store for attachment downloads (also used per-channel in getState)
-const sharedStore = new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN! });
+const sharedStore = new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN ?? "" });
 
-const bot = new SlackBotClass(handler, {
-	appToken: MOM_SLACK_APP_TOKEN,
-	botToken: MOM_SLACK_BOT_TOKEN,
-	workingDir,
-	store: sharedStore,
-});
+const bot = rpcOnly
+	? null
+	: new SlackBotClass(handler, {
+			appToken: MOM_SLACK_APP_TOKEN!,
+			botToken: MOM_SLACK_BOT_TOKEN!,
+			workingDir,
+			store: sharedStore,
+		});
 
-// Start events watcher
-const eventsWatcher = createEventsWatcher(workingDir, bot);
-eventsWatcher.start();
+// Start events watcher (Slack mode only)
+const eventsWatcher = bot ? createEventsWatcher(workingDir, bot) : null;
+if (eventsWatcher) {
+	eventsWatcher.start();
+}
 
 // Handle shutdown
 let shuttingDown = false;
@@ -385,12 +403,36 @@ const shutdown = async (signal: string) => {
 	shuttingDown = true;
 	log.logInfo(`Shutting down (${signal})...`);
 	try {
-		eventsWatcher.stop();
+		if (eventsWatcher) {
+			eventsWatcher.stop();
+		}
+		if (rpcHandle) {
+			try {
+				await rpcHandle.close();
+			} catch {
+				// ignore
+			}
+			rpcHandle = null;
+		}
 		await shutdownSandbox(sandbox);
 	} finally {
 		process.exit(0);
 	}
 };
+
+// Optional RPC socket for smoke testing (mom-cli)
+let rpcHandle: { close(): Promise<void> } | null = null;
+if (rpcSocket !== undefined) {
+	const socketPath = rpcSocket && rpcSocket.length > 0 ? rpcSocket : join(workingDir, ".mom.sock");
+	rpcHandle = await startRpcServer({
+		workingDir,
+		sandbox,
+		socketPath,
+		botToken: MOM_SLACK_BOT_TOKEN!,
+		onShutdown: shutdown,
+	});
+	log.logInfo(`RPC socket enabled: ${socketPath}`);
+}
 
 process.on("SIGINT", () => {
 	void shutdown("SIGINT");
@@ -400,4 +442,8 @@ process.on("SIGTERM", () => {
 	void shutdown("SIGTERM");
 });
 
-bot.start();
+if (bot) {
+	bot.start();
+} else {
+	log.logInfo("RPC-only mode: Slack disabled (missing MOM_SLACK_APP_TOKEN/MOM_SLACK_BOT_TOKEN)");
+}
