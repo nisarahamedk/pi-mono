@@ -1,0 +1,44 @@
+FROM node:20-bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Base utilities + common CLI tooling
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    wget \
+    git \
+    jq \
+    ripgrep \
+    file \
+    less \
+    nano \
+    unzip \
+    zip \
+    tar \
+    procps \
+    openssh-client \
+    gnupg \
+  && rm -rf /var/lib/apt/lists/*
+
+# Chromium + minimal fonts for headless browsing/scraping.
+# (Avoid runtime browser downloads in restricted sandboxes.)
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    chromium \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+  && rm -rf /var/lib/apt/lists/*
+
+# Enable pnpm (often useful for JS repos)
+RUN corepack enable \
+  && corepack prepare pnpm@latest --activate
+
+# Prevent Playwright/Puppeteer from downloading browsers at install time.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    PUPPETEER_SKIP_DOWNLOAD=1
+
+# Install browser automation CLI.
+# Note: use system chromium via --executable-path /usr/bin/chromium when needed.
+RUN npm install -g agent-browser
