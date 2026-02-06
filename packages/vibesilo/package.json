@@ -1,0 +1,42 @@
+{
+	"name": "vibesilo",
+	"version": "0.52.6",
+	"description": "Run agent CLI commands in a container with egress controls and secret injection",
+	"type": "module",
+	"bin": {
+		"vibesilo": "./dist/cli.js"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": "./dist/index.js"
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"scripts": {
+		"clean": "rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json && chmod +x dist/cli.js",
+		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"self-validate": "bash scripts/self-validate.sh",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"dependencies": {
+		"commander": "^12.1.0"
+	},
+	"devDependencies": {
+		"@types/node": "^24.3.0",
+		"typescript": "^5.7.3"
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/nisarahamedk/vibesilo.git",
+		"directory": "packages/vibesilo"
+	},
+	"engines": {
+		"node": ">=20.0.0"
+	}
+}

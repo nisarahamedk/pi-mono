@@ -1,0 +1,15 @@
+{
+  "image": "vibesilo-pi",
+  "allowNet": [
+    "api.github.com",
+    "api.cloudflare.com",
+    "api.convex.dev",
+    "auth.openai.com",
+    "api.openai.com",
+    "chatgpt.com"
+  ],
+  "mounts": [
+    { "host": ".", "guest": "/workspace", "readOnly": false },
+    { "host": "~/.pi/agent/auth.json", "guest": "/root/.pi/agent/auth.json", "readOnly": true }
+  ]
+}
