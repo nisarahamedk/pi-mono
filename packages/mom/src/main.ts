@@ -84,7 +84,7 @@ await validateSandbox(sandbox);
 
 interface ChannelState {
 	running: boolean;
-	runner: AgentRunner;
+	activeRunner: AgentRunner | null;
 	store: ChannelStore;
 	stopRequested: boolean;
 	stopMessageTs?: string;
@@ -95,10 +95,9 @@ const channelStates = new Map<string, ChannelState>();
 function getState(channelId: string): ChannelState {
 	let state = channelStates.get(channelId);
 	if (!state) {
-		const channelDir = join(workingDir, channelId);
 		state = {
 			running: false,
-			runner: getOrCreateRunner(sandbox, channelId, channelDir),
+			activeRunner: null,
 			store: new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN! }),
 			stopRequested: false,
 		};
@@ -111,7 +110,17 @@ function getState(channelId: string): ChannelState {
 // Create SlackContext adapter
 // ============================================================================
 
-function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelState, isEvent?: boolean) {
+function createSlackContext(
+	event: SlackEvent,
+	slack: SlackBot,
+	state: ChannelState,
+	options: {
+		threadTs?: string;
+		rootMessageTs?: string;
+		rootMessageOwned?: boolean;
+		isEvent?: boolean;
+	},
+) {
 	let messageTs: string | null = null;
 	const threadMessageTs: string[] = [];
 	let accumulatedText = "";
@@ -121,8 +130,13 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 
 	const user = slack.getUser(event.user);
 
+	const isDm = event.type === "dm";
+	const threadTs = isDm ? "dm" : (options.threadTs ?? event.ts);
+	const rootMessageTs = options.rootMessageTs ?? null;
+	const rootMessageOwned = options.rootMessageOwned ?? false;
+
 	// Extract event filename for status message
-	const eventFilename = isEvent ? event.text.match(/^\[EVENT:([^:]+):/)?.[1] : undefined;
+	const eventFilename = options.isEvent ? event.text.match(/^\[EVENT:([^:]+):/)?.[1] : undefined;
 
 	return {
 		message: {
@@ -146,12 +160,14 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 
 				if (messageTs) {
 					await slack.updateMessage(event.channel, messageTs, displayText);
-				} else {
+				} else if (isDm) {
 					messageTs = await slack.postMessage(event.channel, displayText);
+				} else {
+					messageTs = await slack.postInThread(event.channel, threadTs, displayText);
 				}
 
 				if (shouldLog && messageTs) {
-					slack.logBotResponse(event.channel, text, messageTs);
+					slack.logBotResponse(event.channel, text, messageTs, threadTs);
 				}
 			});
 			await updatePromise;
@@ -163,8 +179,10 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 				const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 				if (messageTs) {
 					await slack.updateMessage(event.channel, messageTs, displayText);
-				} else {
+				} else if (isDm) {
 					messageTs = await slack.postMessage(event.channel, displayText);
+				} else {
+					messageTs = await slack.postInThread(event.channel, threadTs, displayText);
 				}
 			});
 			await updatePromise;
@@ -172,10 +190,14 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 
 		respondInThread: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
-				if (messageTs) {
-					const ts = await slack.postInThread(event.channel, messageTs, text);
+				if (isDm) {
+					const ts = await slack.postMessage(event.channel, text);
 					threadMessageTs.push(ts);
+					return;
 				}
+
+				const ts = await slack.postInThread(event.channel, threadTs, text);
+				threadMessageTs.push(ts);
 			});
 			await updatePromise;
 		},
@@ -183,9 +205,15 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 		setTyping: async (isTyping: boolean) => {
 			if (isTyping && !messageTs) {
 				updatePromise = updatePromise.then(async () => {
-					if (!messageTs) {
-						accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
-						messageTs = await slack.postMessage(event.channel, accumulatedText + workingIndicator);
+					if (messageTs) return;
+
+					accumulatedText = eventFilename ? `_Starting event: ${eventFilename}_` : "_Thinking_";
+					const displayText = accumulatedText + workingIndicator;
+
+					if (isDm) {
+						messageTs = await slack.postMessage(event.channel, displayText);
+					} else {
+						messageTs = await slack.postInThread(event.channel, threadTs, displayText);
 					}
 				});
 				await updatePromise;
@@ -209,19 +237,33 @@ function createSlackContext(event: SlackEvent, slack: SlackBot, state: ChannelSt
 
 		deleteMessage: async () => {
 			updatePromise = updatePromise.then(async () => {
-				// Delete thread messages first (in reverse order)
+				// Delete thread/extra messages first (in reverse order)
 				for (let i = threadMessageTs.length - 1; i >= 0; i--) {
 					try {
 						await slack.deleteMessage(event.channel, threadMessageTs[i]);
 					} catch {
-						// Ignore errors deleting thread messages
+						// Ignore
 					}
 				}
 				threadMessageTs.length = 0;
-				// Then delete main message
+
+				// Delete main bot message (either DM message or the primary thread reply)
 				if (messageTs) {
-					await slack.deleteMessage(event.channel, messageTs);
+					try {
+						await slack.deleteMessage(event.channel, messageTs);
+					} catch {
+						// Ignore
+					}
 					messageTs = null;
+				}
+
+				// For events, we may own the thread root top-level message.
+				if (rootMessageOwned && rootMessageTs) {
+					try {
+						await slack.deleteMessage(event.channel, rootMessageTs);
+					} catch {
+						// Ignore
+					}
 				}
 			});
 			await updatePromise;
@@ -243,7 +285,7 @@ const handler: MomHandler = {
 		const state = channelStates.get(channelId);
 		if (state?.running) {
 			state.stopRequested = true;
-			state.runner.abort();
+			state.activeRunner?.abort();
 			const ts = await slack.postMessage(channelId, "_Stopping..._");
 			state.stopMessageTs = ts; // Save for updating later
 		} else {
@@ -260,14 +302,40 @@ const handler: MomHandler = {
 
 		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
 
+		let threadTs: string;
+		let rootMessageTs: string | undefined;
+		let rootMessageOwned = false;
+
 		try {
+			if (isEvent) {
+				const eventFilename = event.text.match(/^\[EVENT:([^:]+):/)?.[1] ?? "event";
+				const rootText = `_Starting event: ${eventFilename}_`;
+				rootMessageTs = await slack.postMessage(event.channel, rootText);
+				rootMessageOwned = true;
+				threadTs = rootMessageTs;
+				slack.logBotResponse(event.channel, rootText, rootMessageTs, threadTs);
+			} else if (event.type === "dm") {
+				threadTs = "dm";
+			} else {
+				threadTs = event.threadTs ?? event.ts;
+			}
+
+			const channelDir = join(workingDir, event.channel);
+			const runner = getOrCreateRunner(sandbox, event.channel, channelDir, threadTs);
+			state.activeRunner = runner;
+
 			// Create context adapter
-			const ctx = createSlackContext(event, slack, state, isEvent);
+			const ctx = createSlackContext(event, slack, state, {
+				threadTs,
+				rootMessageTs,
+				rootMessageOwned,
+				isEvent,
+			});
 
 			// Run the agent
 			await ctx.setTyping(true);
 			await ctx.setWorking(true);
-			const result = await state.runner.run(ctx as any, state.store);
+			const result = await runner.run(ctx as any, state.store);
 			await ctx.setWorking(false);
 
 			if (result.stopReason === "aborted" && state.stopRequested) {
@@ -282,6 +350,7 @@ const handler: MomHandler = {
 			log.logWarning(`[${event.channel}] Run error`, err instanceof Error ? err.message : String(err));
 		} finally {
 			state.running = false;
+			state.activeRunner = null;
 		}
 	},
 };

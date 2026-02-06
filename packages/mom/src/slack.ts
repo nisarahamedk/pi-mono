@@ -13,6 +13,14 @@ export interface SlackEvent {
 	type: "mention" | "dm";
 	channel: string;
 	ts: string;
+	/**
+	 * Slack thread root timestamp.
+	 *
+	 * - For thread replies: this is Slack's `thread_ts`.
+	 * - For top-level messages: undefined.
+	 * - For DMs: not used.
+	 */
+	threadTs?: string;
 	user: string;
 	text: string;
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
@@ -226,10 +234,11 @@ export class SlackBot {
 	/**
 	 * Log a bot response to log.jsonl
 	 */
-	logBotResponse(channel: string, text: string, ts: string): void {
+	logBotResponse(channel: string, text: string, ts: string, threadTs: string): void {
 		this.logToFile(channel, {
 			date: new Date().toISOString(),
 			ts,
+			threadTs,
 			user: "bot",
 			text,
 			attachments: [],
@@ -277,6 +286,7 @@ export class SlackBot {
 				channel: string;
 				user: string;
 				ts: string;
+				thread_ts?: string;
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
 
@@ -290,6 +300,7 @@ export class SlackBot {
 				type: "mention",
 				channel: e.channel,
 				ts: e.ts,
+				threadTs: e.thread_ts,
 				user: e.user,
 				text: e.text.replace(/<@[A-Z0-9]+>/gi, "").trim(),
 				files: e.files,
@@ -336,6 +347,7 @@ export class SlackBot {
 				channel: string;
 				user?: string;
 				ts: string;
+				thread_ts?: string;
 				channel_type?: string;
 				subtype?: string;
 				bot_id?: string;
@@ -369,6 +381,7 @@ export class SlackBot {
 				type: isDM ? "dm" : "mention",
 				channel: e.channel,
 				ts: e.ts,
+				threadTs: e.thread_ts,
 				user: e.user,
 				text: (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 				files: e.files,
@@ -417,9 +430,17 @@ export class SlackBot {
 		const user = this.users.get(event.user);
 		// Process attachments - queues downloads in background
 		const attachments = event.files ? this.store.processAttachments(event.channel, event.files, event.ts) : [];
+
+		// Normalize to a thread root key so we can maintain per-thread contexts.
+		// - DMs: single conversation key ("dm")
+		// - Thread replies: Slack's thread_ts
+		// - Top-level channel messages: their own ts becomes the thread root
+		const threadTs = event.type === "dm" ? "dm" : (event.threadTs ?? event.ts);
+
 		this.logToFile(event.channel, {
 			date: new Date(parseFloat(event.ts) * 1000).toISOString(),
 			ts: event.ts,
+			threadTs,
 			user: event.user,
 			userName: user?.userName,
 			displayName: user?.displayName,
@@ -464,6 +485,7 @@ export class SlackBot {
 			bot_id?: string;
 			text?: string;
 			ts?: string;
+			thread_ts?: string;
 			subtype?: string;
 			files?: Array<{ name: string }>;
 		};
@@ -511,9 +533,11 @@ export class SlackBot {
 			// Process attachments - queues downloads in background
 			const attachments = msg.files ? this.store.processAttachments(channelId, msg.files, msg.ts!) : [];
 
+			const threadTs = channelId.startsWith("D") ? "dm" : (msg.thread_ts ?? msg.ts!);
 			this.logToFile(channelId, {
 				date: new Date(parseFloat(msg.ts!) * 1000).toISOString(),
 				ts: msg.ts!,
+				threadTs,
 				user: isMomMessage ? "bot" : msg.user!,
 				userName: isMomMessage ? undefined : user?.userName,
 				displayName: isMomMessage ? undefined : user?.displayName,

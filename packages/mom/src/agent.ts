@@ -12,7 +12,7 @@ import {
 	SessionManager,
 	type Skill,
 } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync } from "fs";
 import { mkdir, writeFile } from "fs/promises";
 import { homedir } from "os";
 import { join } from "path";
@@ -388,27 +388,43 @@ function formatToolArgsForSlack(_toolName: string, args: Record<string, unknown>
 	return lines.join("\n");
 }
 
-// Cache runners per channel
+// Cache runners per (channel, thread)
 const channelRunners = new Map<string, AgentRunner>();
 
+function sanitizeThreadTs(threadTs: string): string {
+	// Slack ts looks like "1234567890.123456". Keep it readable but safe for paths.
+	return threadTs.replace(/[^a-zA-Z0-9._-]/g, "_");
+}
+
 /**
- * Get or create an AgentRunner for a channel.
- * Runners are cached - one per channel, persistent across messages.
+ * Get or create an AgentRunner for a Slack thread.
+ * Runners are cached per (channelId, threadTs).
  */
-export function getOrCreateRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
-	const existing = channelRunners.get(channelId);
+export function getOrCreateRunner(
+	sandboxConfig: SandboxConfig,
+	channelId: string,
+	channelDir: string,
+	threadTs: string,
+): AgentRunner {
+	const key = `${channelId}:${threadTs}`;
+	const existing = channelRunners.get(key);
 	if (existing) return existing;
 
-	const runner = createRunner(sandboxConfig, channelId, channelDir);
-	channelRunners.set(channelId, runner);
+	const runner = createRunner(sandboxConfig, channelId, channelDir, threadTs);
+	channelRunners.set(key, runner);
 	return runner;
 }
 
 /**
- * Create a new AgentRunner for a channel.
+ * Create a new AgentRunner for a Slack thread.
  * Sets up the session and subscribes to events once.
  */
-function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDir: string): AgentRunner {
+function createRunner(
+	sandboxConfig: SandboxConfig,
+	channelId: string,
+	channelDir: string,
+	threadTs: string,
+): AgentRunner {
 	const executor = createExecutor(sandboxConfig);
 	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
 
@@ -421,9 +437,13 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	const systemPrompt = buildSystemPrompt(workspacePath, channelId, memory, sandboxConfig, [], [], skills);
 
 	// Create session manager and settings manager
-	// Use a fixed context.jsonl file per channel (not timestamped like coding-agent)
-	const contextFile = join(channelDir, "context.jsonl");
-	const sessionManager = SessionManager.open(contextFile, channelDir);
+	// Use a fixed context.jsonl file per Slack thread (not timestamped like coding-agent)
+	const threadDir = threadTs === "dm" ? channelDir : join(channelDir, "threads", sanitizeThreadTs(threadTs));
+	if (!existsSync(threadDir)) {
+		mkdirSync(threadDir, { recursive: true });
+	}
+	const contextFile = join(threadDir, "context.jsonl");
+	const sessionManager = SessionManager.open(contextFile, threadDir);
 	const settingsManager = new MomSettingsManager(join(channelDir, ".."));
 
 	// Create AuthStorage and ModelRegistry
@@ -592,13 +612,11 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				for (const thinking of thinkingParts) {
 					log.logThinking(logCtx, thinking);
 					queue.enqueueMessage(`_${thinking}_`, "main", "thinking main");
-					queue.enqueueMessage(`_${thinking}_`, "thread", "thinking thread", false);
 				}
 
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
 					queue.enqueueMessage(text, "main", "response main");
-					queue.enqueueMessage(text, "thread", "response thread", false);
 				}
 			}
 		} else if (event.type === "auto_compaction_start") {
@@ -649,7 +667,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 			// Sync messages from log.jsonl that arrived while we were offline or busy
 			// Exclude the current message (it will be added via prompt())
-			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, ctx.message.ts);
+			const syncedCount = syncLogToSessionManager(sessionManager, channelDir, threadTs, ctx.message.ts);
 			if (syncedCount > 0) {
 				log.logInfo(`[${channelId}] Synced ${syncedCount} messages from log.jsonl`);
 			}
@@ -777,7 +795,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 				newUserMessage: userMessage,
 				imageAttachmentCount: imageAttachments.length,
 			};
-			await writeFile(join(channelDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
+			await writeFile(join(threadDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
 
 			await session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined);
 

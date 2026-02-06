@@ -22,6 +22,7 @@ import { dirname, join } from "path";
 interface LogMessage {
 	date?: string;
 	ts?: string;
+	threadTs?: string;
 	user?: string;
 	userName?: string;
 	text?: string;
@@ -36,12 +37,14 @@ interface LogMessage {
  *
  * @param sessionManager - The SessionManager to sync to
  * @param channelDir - Path to channel directory containing log.jsonl
+ * @param threadTs - Slack thread root timestamp key for this session ("dm" for DMs)
  * @param excludeSlackTs - Slack timestamp of current message (will be added via prompt(), not sync)
  * @returns Number of messages synced
  */
 export function syncLogToSessionManager(
 	sessionManager: SessionManager,
 	channelDir: string,
+	threadTs: string,
 	excludeSlackTs?: string,
 ): number {
 	const logFile = join(channelDir, "log.jsonl");
@@ -102,6 +105,11 @@ export function syncLogToSessionManager(
 			const slackTs = logMsg.ts;
 			const date = logMsg.date;
 			if (!slackTs || !date) continue;
+
+			// Only sync messages from the same Slack thread.
+			// For older logs without threadTs, fall back to ts (treat as its own thread).
+			const msgThreadTs = logMsg.threadTs ?? slackTs;
+			if (msgThreadTs !== threadTs) continue;
 
 			// Skip the current message being processed (will be added via prompt())
 			if (excludeSlackTs && slackTs === excludeSlackTs) continue;
