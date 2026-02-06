@@ -5,7 +5,7 @@ import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
-import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
+import { parseSandboxArg, type SandboxConfig, shutdownSandbox, validateSandbox } from "./sandbox.js";
 import { type MomHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
 import { ChannelStore } from "./store.js";
 
@@ -64,7 +64,7 @@ if (parsedArgs.downloadChannel) {
 
 // Normal bot mode - require working dir
 if (!parsedArgs.workingDir) {
-	console.error("Usage: mom [--sandbox=host|docker:<name>] <working-directory>");
+	console.error("Usage: mom [--sandbox=host|vibesilo|docker:<name>] <working-directory>");
 	console.error("       mom --download <channel-id>");
 	process.exit(1);
 }
@@ -76,7 +76,7 @@ if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
 	process.exit(1);
 }
 
-await validateSandbox(sandbox);
+await validateSandbox(sandbox, workingDir);
 
 // ============================================================================
 // State (per channel)
@@ -359,7 +359,10 @@ const handler: MomHandler = {
 // Start
 // ============================================================================
 
-log.logStartup(workingDir, sandbox.type === "host" ? "host" : `docker:${sandbox.container}`);
+log.logStartup(
+	workingDir,
+	sandbox.type === "host" ? "host" : sandbox.type === "docker" ? `docker:${sandbox.container}` : "vibesilo",
+);
 
 // Shared store for attachment downloads (also used per-channel in getState)
 const sharedStore = new ChannelStore({ workingDir, botToken: MOM_SLACK_BOT_TOKEN! });
@@ -376,16 +379,25 @@ const eventsWatcher = createEventsWatcher(workingDir, bot);
 eventsWatcher.start();
 
 // Handle shutdown
+let shuttingDown = false;
+const shutdown = async (signal: string) => {
+	if (shuttingDown) return;
+	shuttingDown = true;
+	log.logInfo(`Shutting down (${signal})...`);
+	try {
+		eventsWatcher.stop();
+		await shutdownSandbox(sandbox);
+	} finally {
+		process.exit(0);
+	}
+};
+
 process.on("SIGINT", () => {
-	log.logInfo("Shutting down...");
-	eventsWatcher.stop();
-	process.exit(0);
+	void shutdown("SIGINT");
 });
 
 process.on("SIGTERM", () => {
-	log.logInfo("Shutting down...");
-	eventsWatcher.stop();
-	process.exit(0);
+	void shutdown("SIGTERM");
 });
 
 bot.start();

@@ -174,6 +174,21 @@ export interface MomImageSettings {
 	blockImages: boolean;
 }
 
+export interface MomVibesiloSecretSettings {
+	/** Name of host env var to load the secret value from */
+	fromEnv: string;
+	/** Host allowlist for injecting this secret (subset of vibesilo.allowNet) */
+	hosts: string[];
+}
+
+export interface MomVibesiloSettings {
+	image?: string;
+	/** Outbound allow list. Important: vibesilo treats an empty list as allow-all, so mom should require this when enabled. */
+	allowNet?: string[];
+	secrets?: Record<string, MomVibesiloSecretSettings>;
+	debugInjectHeader?: boolean;
+}
+
 export interface MomSettings {
 	defaultProvider?: string;
 	defaultModel?: string;
@@ -188,6 +203,7 @@ export interface MomSettings {
 	postToolDetailsToSlack?: boolean;
 	autoTriggerChannels?: boolean;
 	autoTriggerChannelUserIds?: string[];
+	vibesilo?: Partial<MomVibesiloSettings>;
 }
 
 const DEFAULT_COMPACTION: MomCompactionSettings = {
@@ -209,6 +225,12 @@ const DEFAULT_BRANCH_SUMMARY: MomBranchSummarySettings = {
 const DEFAULT_IMAGES: MomImageSettings = {
 	autoResize: true,
 	blockImages: false,
+};
+
+const DEFAULT_VIBESILO: Required<Pick<MomVibesiloSettings, "image" | "allowNet" | "debugInjectHeader">> = {
+	image: "node:20-bookworm",
+	allowNet: [],
+	debugInjectHeader: false,
 };
 
 /**
@@ -440,6 +462,14 @@ export class MomSettingsManager {
 	setAutoTriggerChannelUserIds(userIds: string[] | undefined): void {
 		this.settings.autoTriggerChannelUserIds = userIds;
 		this.save();
+	}
+
+	getVibesiloSettings(): MomVibesiloSettings {
+		return {
+			...DEFAULT_VIBESILO,
+			...this.settings.vibesilo,
+			secrets: this.settings.vibesilo?.secrets,
+		};
 	}
 
 	getHookPaths(): string[] {

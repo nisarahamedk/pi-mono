@@ -86,8 +86,32 @@ mom [options] <working-directory>
 
 Options:
   --sandbox=host              Run tools on host (not recommended)
-  --sandbox=docker:<name>     Run tools in Docker container (recommended)
+  --sandbox=docker:<name>     Run tools in a Docker container you manage (recommended)
+  --sandbox=vibesilo          Run tools in a vibesilo sandbox (Docker + outbound allowlist + secret injection)
 ```
+
+## Vibesilo Sandbox (recommended if you want outbound-network control)
+
+When running with `--sandbox=vibesilo`, mom starts a dedicated Docker container plus a mitmproxy sidecar. Outbound network access is restricted via `allowNet`, and secrets can be injected on-the-wire.
+
+Add this to `data/settings.json` (workspace root):
+
+```json
+{
+  "vibesilo": {
+    "image": "node:20-bookworm",
+    "allowNet": ["api.github.com", "*.githubusercontent.com"],
+    "secrets": {
+      "GITHUB_TOKEN": { "fromEnv": "GITHUB_TOKEN", "hosts": ["api.github.com"] }
+    }
+  }
+}
+```
+
+Notes:
+- `vibesilo.allowNet` is **required** and must be non-empty (mom rejects empty lists because vibesilo treats them as allow-all).
+- Secrets are **not** stored in `settings.json`. Mom loads them from host environment variables and injects them only for allowed hosts.
+- Inside the sandbox, the secret name (e.g. `$GITHUB_TOKEN`) is set to a *placeholder* value; the real secret is injected by the proxy when the placeholder is used in outgoing requests.
 
 ## Environment Variables
 

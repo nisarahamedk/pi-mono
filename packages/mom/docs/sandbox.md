@@ -1,8 +1,8 @@
-# Mom Docker Sandbox
+# Mom Sandboxes
 
 ## Overview
 
-Mom can run tools either directly on the host or inside a Docker container for isolation.
+Mom can run tools directly on the host or inside a sandbox for isolation.
 
 ## Why Docker?
 
@@ -15,6 +15,8 @@ The Docker sandbox isolates mom's tools to a container where she can only access
 
 ## Quick Start
 
+### Option A: Docker sandbox (persistent container)
+
 ```bash
 # 1. Create and start the container
 cd packages/mom
@@ -23,6 +25,34 @@ cd packages/mom
 # 2. Run mom with Docker sandbox
 mom --sandbox=docker:mom-sandbox ./data
 ```
+
+### Option B: vibesilo sandbox (ephemeral, outbound allowlist + secret injection)
+
+1) Configure `./data/settings.json`:
+
+```json
+{
+  "vibesilo": {
+    "image": "node:20-bookworm",
+    "allowNet": ["api.github.com"],
+    "secrets": {
+      "GITHUB_TOKEN": { "fromEnv": "GITHUB_TOKEN", "hosts": ["api.github.com"] }
+    }
+  }
+}
+```
+
+2) Run mom:
+
+```bash
+export GITHUB_TOKEN=...
+mom --sandbox=vibesilo ./data
+```
+
+Notes:
+- `vibesilo.allowNet` must be non-empty (mom rejects empty lists).
+- The vibesilo sandbox is created when the first tool runs and is torn down when mom exits.
+- The actual secret value is never written to disk; only placeholders exist inside the sandbox.
 
 ## How It Works
 
@@ -107,8 +137,11 @@ To start fresh: `./docker.sh remove && ./docker.sh create ./data`
 # Run on host (default, no isolation)
 mom ./data
 
-# Run with Docker sandbox
+# Run with Docker sandbox (persistent container)
 mom --sandbox=docker:mom-sandbox ./data
+
+# Run with vibesilo sandbox (ephemeral container + outbound allowlist + secret injection)
+mom --sandbox=vibesilo ./data
 
 # Explicit host mode
 mom --sandbox=host ./data

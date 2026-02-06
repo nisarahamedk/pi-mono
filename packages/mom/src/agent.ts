@@ -169,7 +169,7 @@ function buildSystemPrompt(
 	skills: Skill[],
 ): string {
 	const channelPath = `${workspacePath}/${channelId}`;
-	const isDocker = sandboxConfig.type === "docker";
+	const isDocker = sandboxConfig.type !== "host";
 
 	// Format channel mappings
 	const channelMappings =
@@ -179,12 +179,20 @@ function buildSystemPrompt(
 	const userMappings =
 		users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
 
-	const envDescription = isDocker
-		? `You are running inside a Docker container (Alpine Linux).
+	const envDescription =
+		sandboxConfig.type === "docker"
+			? `You are running inside a Docker container (Alpine Linux).
 - Bash working directory: / (use cd or absolute paths)
 - Install tools with: apk add <package>
 - Your changes persist across sessions`
-		: `You are running directly on the host machine.
+			: sandboxConfig.type === "vibesilo"
+				? `You are running inside a Docker container (vibesilo sandbox; image configured in settings.json).
+- Bash working directory: / (use cd or absolute paths)
+- Outbound network is restricted by settings.json vibesilo.allowNet
+- Secret placeholders may be injected via environment variables (same names as configured secrets). Do not print secret values.
+- Install tools via the image's package manager (typically apt)
+- Your changes persist for the lifetime of this mom process`
+				: `You are running directly on the host machine.
 - Bash working directory: ${process.cwd()}
 - Be careful with system modifications`;
 
@@ -446,8 +454,9 @@ function createRunner(
 	channelDir: string,
 	threadTs: string,
 ): AgentRunner {
-	const executor = createExecutor(sandboxConfig);
-	const workspacePath = executor.getWorkspacePath(channelDir.replace(`/${channelId}`, ""));
+	const hostWorkspaceDir = channelDir.replace(`/${channelId}`, "");
+	const executor = createExecutor(sandboxConfig, hostWorkspaceDir);
+	const workspacePath = executor.getWorkspacePath(hostWorkspaceDir);
 
 	// Create tools
 	const tools = createMomTools(executor);
