@@ -140,6 +140,7 @@ export class SlackBot {
 	private settingsManager: MomSettingsManager;
 	private botUserId: string | null = null;
 	private startupTs: string | null = null; // Messages older than this are just logged, not processed
+	private onRestartSandbox?: () => Promise<void>;
 
 	private users = new Map<string, SlackUser>();
 	private channels = new Map<string, SlackChannel>();
@@ -147,11 +148,18 @@ export class SlackBot {
 
 	constructor(
 		handler: MomHandler,
-		config: { appToken: string; botToken: string; workingDir: string; store: ChannelStore },
+		config: {
+			appToken: string;
+			botToken: string;
+			workingDir: string;
+			store: ChannelStore;
+			onRestartSandbox?: () => Promise<void>;
+		},
 	) {
 		this.handler = handler;
 		this.workingDir = config.workingDir;
 		this.store = config.store;
+		this.onRestartSandbox = config.onRestartSandbox;
 		this.settingsManager = new MomSettingsManager(this.workingDir);
 		this.socketClient = new SocketModeClient({ appToken: config.appToken });
 		this.webClient = new WebClient(config.botToken);
@@ -207,6 +215,10 @@ export class SlackBot {
 	async postMessage(channel: string, text: string): Promise<string> {
 		const result = await this.webClient.chat.postMessage({ channel, text });
 		return result.ts as string;
+	}
+
+	async postEphemeral(channel: string, user: string, text: string): Promise<void> {
+		await this.webClient.chat.postEphemeral({ channel, user, text });
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
@@ -302,6 +314,172 @@ export class SlackBot {
 	}
 
 	private setupEventHandlers(): void {
+		// Slash commands (Socket Mode)
+		this.socketClient.on("slash_commands", ({ body, ack }) => {
+			// Ack immediately, do work async.
+			ack();
+
+			void (async () => {
+				const b = body as {
+					command?: string;
+					text?: string;
+					user_id?: string;
+					channel_id?: string;
+				};
+
+				const command = b.command || "/rootclaw";
+				const text = (b.text || "").trim();
+				const userId = b.user_id;
+				const channelId = b.channel_id;
+
+				if (!userId || !channelId) return;
+
+				this.settingsManager.reloadIfChanged();
+				const adminUserIds =
+					this.settingsManager.getAdminUserIds() ?? this.settingsManager.getAutoTriggerChannelUserIds();
+				const isAdmin = !!adminUserIds && adminUserIds.length > 0 && adminUserIds.includes(userId);
+
+				const reply = async (msg: string) => {
+					try {
+						await this.postEphemeral(channelId, userId, msg);
+					} catch (err) {
+						log.logWarning(
+							`Slash command reply failed (${command})`,
+							err instanceof Error ? err.message : String(err),
+						);
+					}
+				};
+
+				const args = text.split(/\s+/).filter(Boolean);
+				const sub = args[0];
+
+				const help =
+					`*${command}* supports:\n` +
+					`• \`${command} status\`\n` +
+					`• \`${command} allow-net list\`\n` +
+					`• \`${command} allow-net add <host> [--restart]\`\n` +
+					`• \`${command} allow-net remove <host> [--restart]\`\n` +
+					`• \`${command} restart-sandbox\`\n` +
+					`\n` +
+					`Admin-only: allow-net add/remove, restart-sandbox`;
+
+				if (!sub || sub === "help" || sub === "-h" || sub === "--help") {
+					await reply(help);
+					return;
+				}
+
+				if (sub === "status") {
+					const vibesilo = this.settingsManager.getVibesiloSettings();
+					const allowNet = vibesilo.allowNet ?? [];
+					await reply(
+						`Workspace: \`${this.workingDir}\`\n` +
+							`vibesilo.image: \`${vibesilo.image ?? "(default)"}\`\n` +
+							`vibesilo.allowNet: ${allowNet.length} entr${allowNet.length === 1 ? "y" : "ies"}`,
+					);
+					return;
+				}
+
+				// Privileged commands
+				if (!isAdmin) {
+					await reply(
+						`Not authorized. Add your Slack user id to \`adminUserIds\` in settings.json (or ensure autoTriggerChannelUserIds contains you).`,
+					);
+					return;
+				}
+
+				const normalizeHost = (input: string): string => {
+					let s = input.trim();
+					s = s.replace(/^[a-zA-Z]+:\/\//, "");
+					s = s.split("/")[0] || s;
+					s = s.split("?")[0] || s;
+					s = s.split("#")[0] || s;
+					return s;
+				};
+
+				const maybeRestart = async (explicit?: boolean) => {
+					if (!explicit) return;
+					if (!this.onRestartSandbox) {
+						await reply("Sandbox restart not available in this mom process.");
+						return;
+					}
+					try {
+						await this.onRestartSandbox();
+						await reply(
+							"Sandbox restart requested. Next tool run will recreate the vibesilo sandbox with the new config.",
+						);
+					} catch (err) {
+						await reply(`Failed to restart sandbox: ${err instanceof Error ? err.message : String(err)}`);
+					}
+				};
+
+				if (sub === "restart-sandbox") {
+					await maybeRestart(true);
+					return;
+				}
+
+				if (sub === "allow-net") {
+					const action = args[1];
+					const hostArg = args[2];
+					const restart = args.includes("--restart");
+					const vibesilo = this.settingsManager.getVibesiloSettings();
+					const allowNet = [...(vibesilo.allowNet ?? [])];
+
+					if (action === "list") {
+						await reply(
+							allowNet.length > 0
+								? `vibesilo.allowNet:\n\n\`${allowNet.join("\n")}\``
+								: "vibesilo.allowNet is empty (this should be disallowed for vibesilo).",
+						);
+						return;
+					}
+
+					if (!hostArg) {
+						await reply(`Missing host.\n\n${help}`);
+						return;
+					}
+
+					const host = normalizeHost(hostArg);
+					if (!host) {
+						await reply(`Invalid host: '${hostArg}'`);
+						return;
+					}
+
+					if (action === "add") {
+						if (!allowNet.includes(host)) {
+							allowNet.push(host);
+							allowNet.sort();
+							this.settingsManager.setVibesiloAllowNet(allowNet);
+						}
+						await reply(`Added \`${host}\` to vibesilo.allowNet. ${restart ? "Restarting sandbox..." : ""}`);
+						await maybeRestart(restart);
+						return;
+					}
+
+					if (action === "remove" || action === "rm") {
+						const next = allowNet.filter((h) => h !== host);
+						if (next.length === allowNet.length) {
+							await reply(`Host not present: \`${host}\``);
+							return;
+						}
+						if (next.length === 0) {
+							await reply(
+								"Refusing to make vibesilo.allowNet empty (vibesilo treats empty as allow-all). Add another host first.",
+							);
+							return;
+						}
+						this.settingsManager.setVibesiloAllowNet(next);
+						await reply(`Removed \`${host}\` from vibesilo.allowNet. ${restart ? "Restarting sandbox..." : ""}`);
+						await maybeRestart(restart);
+						return;
+					}
+
+					await reply(`Unknown allow-net action: '${action}'.\n\n${help}`);
+					return;
+				}
+
+				await reply(`Unknown subcommand: '${sub}'.\n\n${help}`);
+			})();
+		});
 		// Channel @mentions
 		this.socketClient.on("app_mention", ({ event, ack }) => {
 			const e = event as {

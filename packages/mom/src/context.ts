@@ -204,6 +204,8 @@ export interface MomSettings {
 	autoTriggerChannels?: boolean;
 	autoTriggerChannelUserIds?: string[];
 	vibesilo?: Partial<MomVibesiloSettings>;
+	/** User IDs allowed to run privileged slash commands (e.g. updating allowNet). */
+	adminUserIds?: string[];
 }
 
 const DEFAULT_COMPACTION: MomCompactionSettings = {
@@ -470,6 +472,20 @@ export class MomSettingsManager {
 			...this.settings.vibesilo,
 			secrets: this.settings.vibesilo?.secrets,
 		};
+	}
+
+	getAdminUserIds(): string[] | undefined {
+		return this.settings.adminUserIds;
+	}
+
+	setAdminUserIds(userIds: string[] | undefined): void {
+		this.settings.adminUserIds = userIds;
+		this.save();
+	}
+
+	setVibesiloAllowNet(allowNet: string[]): void {
+		this.settings.vibesilo = { ...this.settings.vibesilo, allowNet };
+		this.save();
 	}
 
 	getHookPaths(): string[] {

@@ -390,6 +390,17 @@ const bot = rpcOnly
 			botToken: MOM_SLACK_BOT_TOKEN!,
 			workingDir,
 			store: sharedStore,
+			onRestartSandbox: async () => {
+				// Only applicable for vibesilo. Refuse restart if any channel is currently running.
+				if (sandbox.type !== "vibesilo") {
+					throw new Error("Sandbox restart is only supported for --sandbox=vibesilo");
+				}
+				const anyRunning = Array.from(channelStates.values()).some((s) => s.running);
+				if (anyRunning) {
+					throw new Error("Mom is currently running in at least one channel. Stop it first, then retry.");
+				}
+				await shutdownSandbox(sandbox);
+			},
 		});
 
 // Start events watcher (Slack mode only)
