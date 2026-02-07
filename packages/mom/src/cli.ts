@@ -15,7 +15,16 @@ type RpcRequest =
 	  }
 	| { id?: string; type: "new_session" }
 	| { id?: string; type: "abort"; channelId?: string; session: string }
-	| { id?: string; type: "shutdown" };
+	| { id?: string; type: "shutdown" }
+	| { id?: string; type: "status" }
+	| { id?: string; type: "restart_sandbox" }
+	| {
+			id?: string;
+			type: "allow_net";
+			action: "list" | "add" | "remove";
+			host?: string;
+			restart?: boolean;
+	  };
 
 type RpcResponse =
 	| { type: "response"; id?: string; success: true; data?: any }
@@ -28,12 +37,15 @@ type RpcEvent =
 interface Args {
 	workspace?: string;
 	socket?: string;
-	cmd: "send" | "new-session" | "abort" | "shutdown";
+	cmd: "send" | "new-session" | "abort" | "shutdown" | "status" | "restart-sandbox" | "allow-net";
 	session?: string;
 	channelId?: string;
 	userName?: string;
 	userId?: string;
 	text?: string;
+	allowNetAction?: "list" | "add" | "remove";
+	host?: string;
+	restart?: boolean;
 }
 
 function usage(): never {
@@ -43,6 +55,11 @@ function usage(): never {
 			"  mom-cli --workspace <dir> new-session",
 			"  mom-cli --workspace <dir> send --session <id> --text <msg> [--channel <id>]",
 			"  mom-cli --workspace <dir> abort --session <id> [--channel <id>]",
+			"  mom-cli --workspace <dir> status",
+			"  mom-cli --workspace <dir> allow-net list",
+			"  mom-cli --workspace <dir> allow-net add <host> [--restart]",
+			"  mom-cli --workspace <dir> allow-net remove <host> [--restart]",
+			"  mom-cli --workspace <dir> restart-sandbox",
 			"  mom-cli --workspace <dir> shutdown",
 			"",
 			"Notes:",
@@ -64,6 +81,9 @@ function parseArgs(): Args {
 	let text: string | undefined;
 	let userName: string | undefined;
 	let userId: string | undefined;
+	let allowNetAction: Args["allowNetAction"] | undefined;
+	let host: string | undefined;
+	let restart: boolean | undefined;
 
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
@@ -75,8 +95,35 @@ function parseArgs(): Args {
 			socket = argv[++i];
 		} else if (a.startsWith("--socket=")) {
 			socket = a.slice("--socket=".length);
-		} else if (a === "send" || a === "new-session" || a === "abort" || a === "shutdown") {
+		} else if (
+			a === "send" ||
+			a === "new-session" ||
+			a === "abort" ||
+			a === "shutdown" ||
+			a === "status" ||
+			a === "restart-sandbox" ||
+			a === "allow-net"
+		) {
 			cmd = a;
+			if (cmd === "allow-net") {
+				const maybeAction = argv[i + 1];
+				if (maybeAction && !maybeAction.startsWith("-")) {
+					if (
+						maybeAction === "list" ||
+						maybeAction === "add" ||
+						maybeAction === "remove" ||
+						maybeAction === "rm"
+					) {
+						allowNetAction = maybeAction === "rm" ? "remove" : maybeAction;
+						i++;
+						const maybeHost = argv[i + 1];
+						if (allowNetAction !== "list" && maybeHost && !maybeHost.startsWith("-")) {
+							host = maybeHost;
+							i++;
+						}
+					}
+				}
+			}
 		} else if (a === "--session") {
 			session = argv[++i];
 		} else if (a.startsWith("--session=")) {
@@ -97,12 +144,25 @@ function parseArgs(): Args {
 			userId = argv[++i];
 		} else if (a.startsWith("--user-id=")) {
 			userId = a.slice("--user-id=".length);
+		} else if (a === "--host") {
+			host = argv[++i];
+		} else if (a.startsWith("--host=")) {
+			host = a.slice("--host=".length);
+		} else if (a === "--restart") {
+			restart = true;
 		} else if (!a.startsWith("-")) {
 			// Convenience: allow positional text for send
 			if (!cmd) {
 				// no-op
 			} else if (cmd === "send" && !text) {
 				text = a;
+			} else if (cmd === "allow-net" && !allowNetAction) {
+				// allow-net <action> [host]
+				if (a === "list" || a === "add" || a === "remove" || a === "rm") {
+					allowNetAction = a === "rm" ? "remove" : a;
+				} else {
+					host = host ?? a;
+				}
 			}
 		}
 	}
@@ -116,6 +176,9 @@ function parseArgs(): Args {
 		userName,
 		userId,
 		text,
+		allowNetAction,
+		host,
+		restart,
 	};
 }
 
@@ -162,6 +225,12 @@ function connectAndRun(socketPath: string, req: RpcRequest): Promise<void> {
 					if (req.type === "new_session" && msg.data?.session) {
 						process.stdout.write(`${msg.data.session}\n`);
 					}
+					if (req.type === "status" && msg.data) {
+						process.stdout.write(`${JSON.stringify(msg.data, null, 2)}\n`);
+					}
+					if (req.type === "allow_net" && msg.data?.allowNet) {
+						process.stdout.write(`${msg.data.allowNet.join("\n")}\n`);
+					}
 					continue;
 				}
 
@@ -206,6 +275,33 @@ if (args.cmd === "shutdown") {
 if (args.cmd === "abort") {
 	if (!args.session) usage();
 	await connectAndRun(socketPath, { id, type: "abort", session: args.session, channelId: args.channelId });
+	process.exit(0);
+}
+
+if (args.cmd === "status") {
+	await connectAndRun(socketPath, { id, type: "status" });
+	process.exit(0);
+}
+
+if (args.cmd === "restart-sandbox") {
+	await connectAndRun(socketPath, { id, type: "restart_sandbox" });
+	process.exit(0);
+}
+
+if (args.cmd === "allow-net") {
+	if (!args.allowNetAction) usage();
+	if (args.allowNetAction === "list") {
+		await connectAndRun(socketPath, { id, type: "allow_net", action: "list" });
+		process.exit(0);
+	}
+	if (!args.host) usage();
+	await connectAndRun(socketPath, {
+		id,
+		type: "allow_net",
+		action: args.allowNetAction,
+		host: args.host,
+		restart: !!args.restart,
+	});
 	process.exit(0);
 }
 

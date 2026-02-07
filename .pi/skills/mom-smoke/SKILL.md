@@ -54,6 +54,19 @@ Send a follow-up in the same session:
 mom-cli --workspace ~/mom-workspace send --session "$SESSION" --text "What did you do?"
 ```
 
+Optional: update vibesilo `allowNet` and restart the sandbox (no Slack)
+
+```bash
+# Inspect current allowNet
+mom-cli --workspace ~/mom-workspace allow-net list
+
+# Allow google.com and restart vibesilo sandbox so it takes effect
+mom-cli --workspace ~/mom-workspace allow-net add google.com --restart
+
+# Or restart only (no config change)
+mom-cli --workspace ~/mom-workspace restart-sandbox
+```
+
 ### 2) Observe
 
 - Check the terminal output for `↳ bash:` tool invocations and `✓ bash` results.
@@ -135,6 +148,17 @@ Observe:
 Verify:
 - Proxy logs should show attempted hosts.
 - Proxy config (`/config/secrets.json`) should show `allowNet`.
+
+Optional: adjust allowNet mid-smoke (CLI) and restart sandbox
+
+```bash
+# Example: allow google.com and restart vibesilo sandbox so it takes effect
+mom-cli --workspace ~/mom-workspace allow-net add google.com --restart
+
+# Then ask mom to try again
+mom-cli --workspace ~/mom-workspace send --session "$SESSION" --text \
+  "Now retry: curl -I https://google.com and report the status + first line of body if blocked."
+```
 
 ### Browser navigation (agent-browser)
 

@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
+import { MomSettingsManager } from "./context.js";
 import type { SandboxConfig } from "./sandbox.js";
 import type { SlackContext } from "./slack.js";
 import { ChannelStore } from "./store.js";
@@ -29,6 +30,21 @@ export type RpcRequest =
 	| {
 			id?: string;
 			type: "shutdown";
+	  }
+	| {
+			id?: string;
+			type: "status";
+	  }
+	| {
+			id?: string;
+			type: "restart_sandbox";
+	  }
+	| {
+			id?: string;
+			type: "allow_net";
+			action: "list" | "add" | "remove";
+			host?: string;
+			restart?: boolean;
 	  };
 
 export type RpcResponse =
@@ -45,6 +61,7 @@ export interface RpcServerOptions {
 	socketPath: string;
 	botToken: string;
 	onShutdown: (reason: string) => Promise<void>;
+	onRestartSandbox?: () => Promise<void>;
 }
 
 export interface RpcServerHandle {
@@ -162,7 +179,7 @@ function sendJson(socket: Socket, obj: RpcResponse | RpcEvent): void {
 }
 
 export async function startRpcServer(options: RpcServerOptions): Promise<RpcServerHandle> {
-	const { workingDir, sandbox, socketPath, botToken, onShutdown } = options;
+	const { workingDir, sandbox, socketPath, botToken, onShutdown, onRestartSandbox } = options;
 
 	await mkdir(workingDir, { recursive: true });
 
@@ -220,6 +237,161 @@ export async function startRpcServer(options: RpcServerOptions): Promise<RpcServ
 				);
 				runner.abort();
 				sendJson(socket, { type: "response", id: req.id, success: true });
+				socket.end();
+				return;
+			}
+
+			if (req.type === "status") {
+				const settings = new MomSettingsManager(workingDir);
+				const vibesilo = settings.getVibesiloSettings();
+				const allowNet = vibesilo.allowNet ?? [];
+				sendJson(socket, {
+					type: "response",
+					id: req.id,
+					success: true,
+					data: {
+						sandbox: sandbox.type,
+						vibesilo:
+							sandbox.type === "vibesilo"
+								? { image: vibesilo.image, allowNetCount: allowNet.length }
+								: undefined,
+					},
+				});
+				socket.end();
+				return;
+			}
+
+			if (req.type === "restart_sandbox") {
+				if (sandbox.type !== "vibesilo") {
+					sendJson(socket, {
+						type: "response",
+						id: req.id,
+						success: false,
+						error: "sandbox restart is only supported for --sandbox=vibesilo",
+					});
+					socket.end();
+					return;
+				}
+				if (running.size > 0) {
+					sendJson(socket, {
+						type: "response",
+						id: req.id,
+						success: false,
+						error: "cannot restart sandbox while sessions are running",
+					});
+					socket.end();
+					return;
+				}
+				if (!onRestartSandbox) {
+					sendJson(socket, {
+						type: "response",
+						id: req.id,
+						success: false,
+						error: "restart callback not configured",
+					});
+					socket.end();
+					return;
+				}
+				await onRestartSandbox();
+				sendJson(socket, { type: "response", id: req.id, success: true });
+				socket.end();
+				return;
+			}
+
+			if (req.type === "allow_net") {
+				if (sandbox.type !== "vibesilo") {
+					sendJson(socket, {
+						type: "response",
+						id: req.id,
+						success: false,
+						error: "allowNet is only applicable for --sandbox=vibesilo",
+					});
+					socket.end();
+					return;
+				}
+				const settings = new MomSettingsManager(workingDir);
+				settings.reloadIfChanged();
+				const vibesilo = settings.getVibesiloSettings();
+				const current = [...(vibesilo.allowNet ?? [])];
+
+				const normalizeHost = (input: string): string => {
+					let s = input.trim();
+					s = s.replace(/^[a-zA-Z]+:\/\//, "");
+					s = s.split("/")[0] || s;
+					s = s.split("?")[0] || s;
+					s = s.split("#")[0] || s;
+					return s;
+				};
+
+				if (req.action === "list") {
+					sendJson(socket, {
+						type: "response",
+						id: req.id,
+						success: true,
+						data: { allowNet: current },
+					});
+					socket.end();
+					return;
+				}
+
+				const host = req.host ? normalizeHost(req.host) : "";
+				if (!host) {
+					sendJson(socket, { type: "response", id: req.id, success: false, error: "missing host" });
+					socket.end();
+					return;
+				}
+
+				let next = current;
+				if (req.action === "add") {
+					if (!next.includes(host)) {
+						next = [...next, host].sort();
+					}
+					settings.setVibesiloAllowNet(next);
+				} else if (req.action === "remove") {
+					next = next.filter((h) => h !== host);
+					if (next.length === 0) {
+						sendJson(socket, {
+							type: "response",
+							id: req.id,
+							success: false,
+							error: "refusing to make vibesilo.allowNet empty (empty means allow-all in vibesilo)",
+						});
+						socket.end();
+						return;
+					}
+					settings.setVibesiloAllowNet(next);
+				}
+
+				if (req.restart) {
+					if (running.size > 0) {
+						sendJson(socket, {
+							type: "response",
+							id: req.id,
+							success: false,
+							error: "cannot restart sandbox while sessions are running",
+						});
+						socket.end();
+						return;
+					}
+					if (!onRestartSandbox) {
+						sendJson(socket, {
+							type: "response",
+							id: req.id,
+							success: false,
+							error: "restart callback not configured",
+						});
+						socket.end();
+						return;
+					}
+					await onRestartSandbox();
+				}
+
+				sendJson(socket, {
+					type: "response",
+					id: req.id,
+					success: true,
+					data: { allowNet: next },
+				});
 				socket.end();
 				return;
 			}

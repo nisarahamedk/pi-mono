@@ -443,6 +443,16 @@ if (rpcSocket !== undefined) {
 		socketPath,
 		botToken: MOM_SLACK_BOT_TOKEN!,
 		onShutdown: shutdown,
+		onRestartSandbox: async () => {
+			if (sandbox.type !== "vibesilo") {
+				throw new Error("Sandbox restart is only supported for --sandbox=vibesilo");
+			}
+			const anyRunning = Array.from(channelStates.values()).some((s) => s.running);
+			if (anyRunning) {
+				throw new Error("Mom is currently running in at least one channel. Stop it first, then retry.");
+			}
+			await shutdownSandbox(sandbox);
+		},
 	});
 	log.logInfo(`RPC socket enabled: ${socketPath}`);
 }
