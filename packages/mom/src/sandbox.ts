@@ -198,6 +198,83 @@ async function probeHostBrowserBridge(
 	return { running, healthy };
 }
 
+function parseHostPort(target: string): { host: string; port: number } {
+	const idx = target.lastIndexOf(":");
+	if (idx === -1) return { host: target, port: 9223 };
+	const host = target.slice(0, idx);
+	const port = Number(target.slice(idx + 1));
+	return { host: host || "host.docker.internal", port: Number.isFinite(port) && port > 0 ? port : 9223 };
+}
+
+async function deriveProxyContainerName(sandboxContainerId: string): Promise<string | null> {
+	const hostExecutor = new HostExecutor();
+	const inspect = await hostExecutor.exec(`docker inspect -f '{{.Name}}' ${sandboxContainerId}`, { timeout: 5 });
+	if (inspect.code !== 0) return null;
+	const sandboxName = inspect.stdout.trim().replace(/^\//, "");
+	const prefix = "agent-sandbox-";
+	if (!sandboxName.startsWith(prefix)) return null;
+	return `agent-sandbox-proxy-${sandboxName.slice(prefix.length)}`;
+}
+
+async function ensureProxyCdpRelay(
+	proxyName: string,
+	targetHost: string,
+	targetPort: number,
+	relayPort: number,
+): Promise<void> {
+	const hostExecutor = new HostExecutor();
+	const scriptPath = `/tmp/mom-proxy-cdp-relay-${relayPort}.py`;
+	const pidPath = `/tmp/mom-proxy-cdp-relay-${relayPort}.pid`;
+	const logPath = `/tmp/mom-proxy-cdp-relay-${relayPort}.log`;
+	const py = [
+		`import socket,threading,os`,
+		`LISTEN=("0.0.0.0",${relayPort})`,
+		`TARGET_HOST=${JSON.stringify(targetHost)}`,
+		`TARGET_PORT=${targetPort}`,
+		`ls=socket.socket(socket.AF_INET,socket.SOCK_STREAM)`,
+		`ls.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)`,
+		`ls.bind(LISTEN)`,
+		`ls.listen(64)`,
+		`open(${JSON.stringify(pidPath)},"w").write(str(os.getpid()))`,
+		`def pipe(a,b):`,
+		`  try:`,
+		`    while True:`,
+		`      d=a.recv(65536)`,
+		`      if not d: break`,
+		`      b.sendall(d)`,
+		`  except Exception: pass`,
+		`  finally:`,
+		`    try: a.shutdown(socket.SHUT_RDWR)`,
+		`    except Exception: pass`,
+		`    try: b.shutdown(socket.SHUT_RDWR)`,
+		`    except Exception: pass`,
+		`    a.close(); b.close()`,
+		`while True:`,
+		`  c,_=ls.accept()`,
+		`  t=socket.socket(socket.AF_INET,socket.SOCK_STREAM)`,
+		`  try:`,
+		`    target_ip=socket.gethostbyname(TARGET_HOST)`,
+		`    t.connect((target_ip,TARGET_PORT))`,
+		`  except Exception:`,
+		`    c.close(); t.close(); continue`,
+		`  threading.Thread(target=pipe,args=(c,t),daemon=True).start()`,
+		`  threading.Thread(target=pipe,args=(t,c),daemon=True).start()`,
+	].join("\n");
+
+	const cmd = [
+		`if [ -f ${pidPath} ] && kill -0 "$(cat ${pidPath})" 2>/dev/null; then exit 0; fi`,
+		`cat > ${scriptPath} <<'PY'`,
+		py,
+		`PY`,
+		`nohup python ${scriptPath} >${logPath} 2>&1 &`,
+	].join("\n");
+
+	const result = await hostExecutor.exec(`docker exec ${proxyName} sh -lc ${shellEscape(cmd)}`, { timeout: 12 });
+	if (result.code !== 0) {
+		throw new Error(`Failed to start proxy CDP relay in ${proxyName}. ${result.stderr || result.stdout}`.trim());
+	}
+}
+
 async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox: VibesiloSandbox): Promise<void> {
 	const settings = new MomSettingsManager(hostWorkspaceDir);
 	const hostBrowser = settings.getHostBrowserSettings();
@@ -205,14 +282,39 @@ async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox
 
 	const cdpPort = hostBrowser.cdpPort ?? 9223;
 	const cdpTarget = hostBrowser.cdpTarget ?? "host.docker.internal:9223";
-	const bridgeKey = `${sandbox.containerId}:${cdpPort}:${cdpTarget}`;
 	const hostExecutor = new HostExecutor();
+	const parsedTarget = parseHostPort(cdpTarget);
+	let effectiveTarget = cdpTarget;
+
+	// In vibesilo networks, sandbox often can't directly resolve/reach host.docker.internal.
+	// Route through the proxy container when host CDP is requested.
+	if (parsedTarget.host === "host.docker.internal") {
+		const proxyName = await deriveProxyContainerName(sandbox.containerId);
+		if (!proxyName) {
+			const msg = "Could not derive vibesilo proxy container name for host browser relay";
+			if (hostBrowser.required) throw new Error(msg);
+			sandboxLog(`${msg}. Continuing without host browser.`);
+			return;
+		}
+		const relayPort = parsedTarget.port + 10000;
+		try {
+			await ensureProxyCdpRelay(proxyName, parsedTarget.host, parsedTarget.port, relayPort);
+			effectiveTarget = `${proxyName}:${relayPort}`;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (hostBrowser.required) throw new Error(msg);
+			sandboxLog(`${msg}. Continuing without host browser.`);
+			return;
+		}
+	}
+
+	const bridgeKey = `${sandbox.containerId}:${cdpPort}:${effectiveTarget}`;
 	const pidFile = `/tmp/mom-cdp-bridge-${cdpPort}.pid`;
 	const logFile = `/tmp/mom-cdp-bridge-${cdpPort}.log`;
 	const startCmd = [
 		`command -v socat >/dev/null 2>&1 || { echo "socat not found"; exit 127; }`,
 		`if [ -f ${pidFile} ] && kill -0 "$(cat ${pidFile})" 2>/dev/null; then exit 0; fi`,
-		`nohup socat TCP-LISTEN:${cdpPort},bind=127.0.0.1,reuseaddr,fork TCP:${cdpTarget} >${logFile} 2>&1 & echo $! > ${pidFile}`,
+		`nohup socat TCP-LISTEN:${cdpPort},bind=127.0.0.1,reuseaddr,fork TCP:${effectiveTarget} >${logFile} 2>&1 & echo $! > ${pidFile}`,
 	].join("; ");
 
 	// Start bridge only if needed/new target.
@@ -224,7 +326,7 @@ async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox
 			},
 		);
 		if (startResult.code !== 0) {
-			const msg = `Failed to start host-browser bridge (socat) for ${cdpTarget} on 127.0.0.1:${cdpPort}`;
+			const msg = `Failed to start host-browser bridge (socat) for ${effectiveTarget} on 127.0.0.1:${cdpPort}`;
 			if (hostBrowser.required) throw new Error(`${msg}. ${startResult.stderr || startResult.stdout}`.trim());
 			sandboxLog(`${msg}. Continuing without host browser.`);
 			return;
