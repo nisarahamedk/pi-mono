@@ -60,6 +60,9 @@ Optional: update vibesilo `allowNet` and restart the sandbox (no Slack)
 # Inspect current allowNet
 mom-cli --workspace ~/mom-workspace allow-net list
 
+# Optional: check host-browser CDP bridge status (for tools like upwork-cli)
+mom-cli --workspace ~/mom-workspace host-browser status
+
 # Allow google.com and restart vibesilo sandbox so it takes effect
 mom-cli --workspace ~/mom-workspace allow-net add google.com --restart
 

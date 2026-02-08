@@ -20,6 +20,7 @@ RUN apt-get update \
     procps \
     openssh-client \
     gnupg \
+    socat \
   && rm -rf /var/lib/apt/lists/*
 
 # Chromium + minimal fonts for headless browsing/scraping.

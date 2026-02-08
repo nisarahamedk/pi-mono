@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { MomSettingsManager } from "./context.js";
-import type { SandboxConfig } from "./sandbox.js";
+import { getHostBrowserStatus, type SandboxConfig } from "./sandbox.js";
 import type { SlackContext } from "./slack.js";
 import { ChannelStore } from "./store.js";
 
@@ -45,6 +45,10 @@ export type RpcRequest =
 			action: "list" | "add" | "remove";
 			host?: string;
 			restart?: boolean;
+	  }
+	| {
+			id?: string;
+			type: "host_browser_status";
 	  };
 
 export type RpcResponse =
@@ -245,6 +249,7 @@ export async function startRpcServer(options: RpcServerOptions): Promise<RpcServ
 				const settings = new MomSettingsManager(workingDir);
 				const vibesilo = settings.getVibesiloSettings();
 				const allowNet = vibesilo.allowNet ?? [];
+				const hostBrowser = await getHostBrowserStatus(sandbox, workingDir);
 				sendJson(socket, {
 					type: "response",
 					id: req.id,
@@ -255,6 +260,7 @@ export async function startRpcServer(options: RpcServerOptions): Promise<RpcServ
 							sandbox.type === "vibesilo"
 								? { image: vibesilo.image, allowNetCount: allowNet.length }
 								: undefined,
+						hostBrowser,
 					},
 				});
 				socket.end();
@@ -392,6 +398,13 @@ export async function startRpcServer(options: RpcServerOptions): Promise<RpcServ
 					success: true,
 					data: { allowNet: next },
 				});
+				socket.end();
+				return;
+			}
+
+			if (req.type === "host_browser_status") {
+				const status = await getHostBrowserStatus(sandbox, workingDir);
+				sendJson(socket, { type: "response", id: req.id, success: true, data: status });
 				socket.end();
 				return;
 			}

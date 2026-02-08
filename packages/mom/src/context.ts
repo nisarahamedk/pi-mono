@@ -189,6 +189,18 @@ export interface MomVibesiloSettings {
 	debugInjectHeader?: boolean;
 }
 
+export interface MomHostBrowserSettings {
+	enabled?: boolean;
+	/** Local listener port inside sandbox (upwork-cli expects 127.0.0.1:<port>). */
+	cdpPort?: number;
+	/** Host CDP endpoint target reachable from container (e.g. host.docker.internal:9223). */
+	cdpTarget?: string;
+	/** If true, fail runs when bridge/health-check can't be established. */
+	required?: boolean;
+	/** Keep the localhost bridge alive automatically (default true). */
+	autoStartBridge?: boolean;
+}
+
 export interface MomSettings {
 	defaultProvider?: string;
 	defaultModel?: string;
@@ -204,6 +216,7 @@ export interface MomSettings {
 	autoTriggerChannels?: boolean;
 	autoTriggerChannelUserIds?: string[];
 	vibesilo?: Partial<MomVibesiloSettings>;
+	hostBrowser?: Partial<MomHostBrowserSettings>;
 	/** User IDs allowed to run privileged slash commands (e.g. updating allowNet). */
 	adminUserIds?: string[];
 }
@@ -233,6 +246,16 @@ const DEFAULT_VIBESILO: Required<Pick<MomVibesiloSettings, "image" | "allowNet" 
 	image: "node:20-bookworm",
 	allowNet: [],
 	debugInjectHeader: false,
+};
+
+const DEFAULT_HOST_BROWSER: Required<
+	Pick<MomHostBrowserSettings, "enabled" | "cdpPort" | "cdpTarget" | "required" | "autoStartBridge">
+> = {
+	enabled: false,
+	cdpPort: 9223,
+	cdpTarget: "host.docker.internal:9223",
+	required: false,
+	autoStartBridge: true,
 };
 
 /**
@@ -485,6 +508,21 @@ export class MomSettingsManager {
 
 	setVibesiloAllowNet(allowNet: string[]): void {
 		this.settings.vibesilo = { ...this.settings.vibesilo, allowNet };
+		this.save();
+	}
+
+	getHostBrowserSettings(): MomHostBrowserSettings {
+		return {
+			...DEFAULT_HOST_BROWSER,
+			...this.settings.hostBrowser,
+		};
+	}
+
+	setHostBrowserSettings(settings: Partial<MomHostBrowserSettings>): void {
+		this.settings.hostBrowser = {
+			...this.settings.hostBrowser,
+			...settings,
+		};
 		this.save();
 	}
 

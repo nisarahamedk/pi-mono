@@ -104,6 +104,13 @@ Add this to `data/settings.json` (workspace root):
     "secrets": {
       "GITHUB_TOKEN": { "fromEnv": "GITHUB_TOKEN", "hosts": ["api.github.com"] }
     }
+  },
+  "hostBrowser": {
+    "enabled": false,
+    "cdpPort": 9223,
+    "cdpTarget": "host.docker.internal:9223",
+    "required": false,
+    "autoStartBridge": true
   }
 }
 ```
@@ -112,6 +119,8 @@ Notes:
 - `vibesilo.allowNet` is **required** and must be non-empty (mom rejects empty lists because vibesilo treats them as allow-all).
 - Secrets are **not** stored in `settings.json`. Mom loads them from host environment variables and injects them only for allowed hosts.
 - Inside the sandbox, the secret name (e.g. `$GITHUB_TOKEN`) is set to a *placeholder* value; the real secret is injected by the proxy when the placeholder is used in outgoing requests.
+- Optional `hostBrowser` creates a localhost CDP bridge in the sandbox (`127.0.0.1:<cdpPort>` -> `<cdpTarget>`), useful for tools that require `127.0.0.1` CDP (for example upwork-cli).
+- `hostBrowser.required=true` is recommended for cron/automation workflows so runs fail fast when host CDP is unavailable.
 
 ## Environment Variables
 

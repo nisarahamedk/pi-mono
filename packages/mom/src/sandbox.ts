@@ -121,6 +121,7 @@ export async function shutdownSandbox(config: SandboxConfig): Promise<void> {
 		vibesiloSandboxCreating = null;
 		vibesiloHostWorkspaceDir = null;
 		vibesiloPlaceholders = null;
+		vibesiloBridgeKey = null;
 	}
 }
 
@@ -153,6 +154,163 @@ let vibesiloSandbox: VibesiloSandbox | null = null;
 let vibesiloSandboxCreating: Promise<VibesiloSandbox> | null = null;
 let vibesiloHostWorkspaceDir: string | null = null;
 let vibesiloPlaceholders: Record<string, string> | null = null;
+let vibesiloBridgeKey: string | null = null;
+
+export interface HostBrowserStatus {
+	configured: boolean;
+	enabled: boolean;
+	cdpPort: number;
+	cdpTarget: string;
+	bridgeRunning: boolean;
+	healthy: boolean;
+	reason?: string;
+}
+
+function getHostBrowserStatusDefault(reason?: string): HostBrowserStatus {
+	return {
+		configured: false,
+		enabled: false,
+		cdpPort: 9223,
+		cdpTarget: "host.docker.internal:9223",
+		bridgeRunning: false,
+		healthy: false,
+		reason,
+	};
+}
+
+async function probeHostBrowserBridge(
+	containerId: string,
+	cdpPort: number,
+): Promise<{ running: boolean; healthy: boolean }> {
+	const hostExecutor = new HostExecutor();
+	const pidFile = `/tmp/mom-cdp-bridge-${cdpPort}.pid`;
+	const runningCmd = `if [ -f ${pidFile} ] && kill -0 "$(cat ${pidFile})" 2>/dev/null; then echo running; else echo stopped; fi`;
+	const runningResult = await hostExecutor.exec(`docker exec ${containerId} sh -lc ${shellEscape(runningCmd)}`, {
+		timeout: 5,
+	});
+	const running = runningResult.code === 0 && runningResult.stdout.trim() === "running";
+
+	const healthCmd = `curl -fsS --max-time 3 http://127.0.0.1:${cdpPort}/json/version >/dev/null`;
+	const healthResult = await hostExecutor.exec(`docker exec ${containerId} sh -lc ${shellEscape(healthCmd)}`, {
+		timeout: 6,
+	});
+	const healthy = healthResult.code === 0;
+	return { running, healthy };
+}
+
+async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox: VibesiloSandbox): Promise<void> {
+	const settings = new MomSettingsManager(hostWorkspaceDir);
+	const hostBrowser = settings.getHostBrowserSettings();
+	if (!hostBrowser.enabled || !hostBrowser.autoStartBridge) return;
+
+	const cdpPort = hostBrowser.cdpPort ?? 9223;
+	const cdpTarget = hostBrowser.cdpTarget ?? "host.docker.internal:9223";
+	const bridgeKey = `${sandbox.containerId}:${cdpPort}:${cdpTarget}`;
+	const hostExecutor = new HostExecutor();
+	const pidFile = `/tmp/mom-cdp-bridge-${cdpPort}.pid`;
+	const logFile = `/tmp/mom-cdp-bridge-${cdpPort}.log`;
+	const startCmd = [
+		`command -v socat >/dev/null 2>&1 || { echo "socat not found"; exit 127; }`,
+		`if [ -f ${pidFile} ] && kill -0 "$(cat ${pidFile})" 2>/dev/null; then exit 0; fi`,
+		`nohup socat TCP-LISTEN:${cdpPort},bind=127.0.0.1,reuseaddr,fork TCP:${cdpTarget} >${logFile} 2>&1 & echo $! > ${pidFile}`,
+	].join("; ");
+
+	// Start bridge only if needed/new target.
+	if (vibesiloBridgeKey !== bridgeKey) {
+		const startResult = await hostExecutor.exec(
+			`docker exec ${sandbox.containerId} sh -lc ${shellEscape(startCmd)}`,
+			{
+				timeout: 10,
+			},
+		);
+		if (startResult.code !== 0) {
+			const msg = `Failed to start host-browser bridge (socat) for ${cdpTarget} on 127.0.0.1:${cdpPort}`;
+			if (hostBrowser.required) throw new Error(`${msg}. ${startResult.stderr || startResult.stdout}`.trim());
+			sandboxLog(`${msg}. Continuing without host browser.`);
+			return;
+		}
+		vibesiloBridgeKey = bridgeKey;
+	}
+
+	let healthy = false;
+	for (let i = 0; i < 10; i++) {
+		const healthResult = await hostExecutor.exec(
+			`docker exec ${sandbox.containerId} sh -lc ${shellEscape(`curl -fsS --max-time 3 http://127.0.0.1:${cdpPort}/json/version >/dev/null`)}`,
+			{ timeout: 6 },
+		);
+		if (healthResult.code === 0) {
+			healthy = true;
+			break;
+		}
+		await new Promise((r) => setTimeout(r, 250));
+	}
+
+	if (!healthy) {
+		const msg =
+			`Host-browser bridge is up but CDP health check failed at 127.0.0.1:${cdpPort}. ` +
+			`Expected host target ${cdpTarget}.`;
+		if (hostBrowser.required) throw new Error(msg);
+		sandboxLog(`${msg} Continuing without host browser.`);
+		return;
+	}
+}
+
+export async function getHostBrowserStatus(
+	config: SandboxConfig,
+	hostWorkspaceDir: string,
+): Promise<HostBrowserStatus> {
+	if (config.type !== "vibesilo") {
+		return getHostBrowserStatusDefault("host browser bridge is only supported for vibesilo sandbox");
+	}
+
+	const settings = new MomSettingsManager(hostWorkspaceDir);
+	const hostBrowser = settings.getHostBrowserSettings();
+	const cdpPort = hostBrowser.cdpPort ?? 9223;
+	const cdpTarget = hostBrowser.cdpTarget ?? "host.docker.internal:9223";
+	if (!hostBrowser.enabled) {
+		return {
+			configured: true,
+			enabled: false,
+			cdpPort,
+			cdpTarget,
+			bridgeRunning: false,
+			healthy: false,
+			reason: "disabled in settings.json (hostBrowser.enabled=false)",
+		};
+	}
+	if (!vibesiloSandbox) {
+		return {
+			configured: true,
+			enabled: true,
+			cdpPort,
+			cdpTarget,
+			bridgeRunning: false,
+			healthy: false,
+			reason: "vibesilo sandbox not started yet",
+		};
+	}
+	try {
+		const probe = await probeHostBrowserBridge(vibesiloSandbox.containerId, cdpPort);
+		return {
+			configured: true,
+			enabled: true,
+			cdpPort,
+			cdpTarget,
+			bridgeRunning: probe.running,
+			healthy: probe.healthy,
+		};
+	} catch (err) {
+		return {
+			configured: true,
+			enabled: true,
+			cdpPort,
+			cdpTarget,
+			bridgeRunning: false,
+			healthy: false,
+			reason: err instanceof Error ? err.message : String(err),
+		};
+	}
+}
 
 async function getOrCreateVibesiloSandbox(hostWorkspaceDir: string): Promise<VibesiloSandbox> {
 	if (vibesiloSandbox) return vibesiloSandbox;
@@ -200,6 +358,7 @@ async function getOrCreateVibesiloSandbox(hostWorkspaceDir: string): Promise<Vib
 
 		vibesiloSandbox = sandbox;
 		vibesiloPlaceholders = sandbox.placeholders;
+		await ensureVibesiloHostBrowserBridge(hostWorkspaceDir, sandbox);
 		return sandbox;
 	})();
 
@@ -215,6 +374,7 @@ class VibesiloExecutor implements Executor {
 
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
 		const sandbox = await getOrCreateVibesiloSandbox(this.hostWorkspaceDir);
+		await ensureVibesiloHostBrowserBridge(this.hostWorkspaceDir, sandbox);
 		const placeholders = vibesiloPlaceholders ?? {};
 		const envFlags = Object.entries(placeholders)
 			.map(([name, value]) => `-e ${shellEscape(`${name}=${value}`)}`)

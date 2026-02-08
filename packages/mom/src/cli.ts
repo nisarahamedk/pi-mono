@@ -24,7 +24,8 @@ type RpcRequest =
 			action: "list" | "add" | "remove";
 			host?: string;
 			restart?: boolean;
-	  };
+	  }
+	| { id?: string; type: "host_browser_status" };
 
 type RpcResponse =
 	| { type: "response"; id?: string; success: true; data?: any }
@@ -37,13 +38,14 @@ type RpcEvent =
 interface Args {
 	workspace?: string;
 	socket?: string;
-	cmd: "send" | "new-session" | "abort" | "shutdown" | "status" | "restart-sandbox" | "allow-net";
+	cmd: "send" | "new-session" | "abort" | "shutdown" | "status" | "restart-sandbox" | "allow-net" | "host-browser";
 	session?: string;
 	channelId?: string;
 	userName?: string;
 	userId?: string;
 	text?: string;
 	allowNetAction?: "list" | "add" | "remove";
+	hostBrowserAction?: "status";
 	host?: string;
 	restart?: boolean;
 }
@@ -59,6 +61,7 @@ function usage(): never {
 			"  mom-cli --workspace <dir> allow-net list",
 			"  mom-cli --workspace <dir> allow-net add <host> [--restart]",
 			"  mom-cli --workspace <dir> allow-net remove <host> [--restart]",
+			"  mom-cli --workspace <dir> host-browser status",
 			"  mom-cli --workspace <dir> restart-sandbox",
 			"  mom-cli --workspace <dir> shutdown",
 			"",
@@ -82,6 +85,7 @@ function parseArgs(): Args {
 	let userName: string | undefined;
 	let userId: string | undefined;
 	let allowNetAction: Args["allowNetAction"] | undefined;
+	let hostBrowserAction: Args["hostBrowserAction"] | undefined;
 	let host: string | undefined;
 	let restart: boolean | undefined;
 
@@ -102,7 +106,8 @@ function parseArgs(): Args {
 			a === "shutdown" ||
 			a === "status" ||
 			a === "restart-sandbox" ||
-			a === "allow-net"
+			a === "allow-net" ||
+			a === "host-browser"
 		) {
 			cmd = a;
 			if (cmd === "allow-net") {
@@ -122,6 +127,13 @@ function parseArgs(): Args {
 							i++;
 						}
 					}
+				}
+			}
+			if (cmd === "host-browser") {
+				const maybeAction = argv[i + 1];
+				if (maybeAction === "status") {
+					hostBrowserAction = "status";
+					i++;
 				}
 			}
 		} else if (a === "--session") {
@@ -163,6 +175,8 @@ function parseArgs(): Args {
 				} else {
 					host = host ?? a;
 				}
+			} else if (cmd === "host-browser" && !hostBrowserAction) {
+				if (a === "status") hostBrowserAction = "status";
 			}
 		}
 	}
@@ -177,6 +191,7 @@ function parseArgs(): Args {
 		userId,
 		text,
 		allowNetAction,
+		hostBrowserAction,
 		host,
 		restart,
 	};
@@ -226,6 +241,9 @@ function connectAndRun(socketPath: string, req: RpcRequest): Promise<void> {
 						process.stdout.write(`${msg.data.session}\n`);
 					}
 					if (req.type === "status" && msg.data) {
+						process.stdout.write(`${JSON.stringify(msg.data, null, 2)}\n`);
+					}
+					if (req.type === "host_browser_status" && msg.data) {
 						process.stdout.write(`${JSON.stringify(msg.data, null, 2)}\n`);
 					}
 					if (req.type === "allow_net" && msg.data?.allowNet) {
@@ -302,6 +320,12 @@ if (args.cmd === "allow-net") {
 		host: args.host,
 		restart: !!args.restart,
 	});
+	process.exit(0);
+}
+
+if (args.cmd === "host-browser") {
+	if (args.hostBrowserAction !== "status") usage();
+	await connectAndRun(socketPath, { id, type: "host_browser_status" });
 	process.exit(0);
 }
 
