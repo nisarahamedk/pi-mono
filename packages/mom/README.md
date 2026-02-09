@@ -110,7 +110,9 @@ Add this to `data/settings.json` (workspace root):
     "cdpPort": 9223,
     "cdpTarget": "host.docker.internal:9223",
     "required": false,
-    "autoStartBridge": true
+    "autoStartBridge": true,
+    "ensureRunning": false,
+    "launchCommand": ""
   }
 }
 ```
@@ -121,6 +123,7 @@ Notes:
 - Inside the sandbox, the secret name (e.g. `$GITHUB_TOKEN`) is set to a *placeholder* value; the real secret is injected by the proxy when the placeholder is used in outgoing requests.
 - Optional `hostBrowser` creates a localhost CDP bridge in the sandbox (`127.0.0.1:<cdpPort>` -> `<cdpTarget>`), useful for tools that require `127.0.0.1` CDP (for example upwork-cli).
 - `hostBrowser.required=true` is recommended for cron/automation workflows so runs fail fast when host CDP is unavailable.
+- Optional lifecycle control: set `hostBrowser.ensureRunning=true` and `hostBrowser.launchCommand` so mom auto-starts host Chrome CDP when needed (gateway-level, not per cron run).
 - `mom-vibesilo-tools` image always includes `agent-browser`.
 - Optional: place a packed `upwork-cli` tarball at `packages/mom/docker/upwork-cli.tgz` before building image to include private upwork-cli.
 

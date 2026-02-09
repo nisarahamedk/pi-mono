@@ -199,6 +199,10 @@ export interface MomHostBrowserSettings {
 	required?: boolean;
 	/** Keep the localhost bridge alive automatically (default true). */
 	autoStartBridge?: boolean;
+	/** If true, mom attempts to auto-start host browser when CDP is unavailable. */
+	ensureRunning?: boolean;
+	/** Host shell command to launch browser with CDP enabled (should be idempotent). */
+	launchCommand?: string;
 }
 
 export interface MomSettings {
@@ -249,13 +253,14 @@ const DEFAULT_VIBESILO: Required<Pick<MomVibesiloSettings, "image" | "allowNet" 
 };
 
 const DEFAULT_HOST_BROWSER: Required<
-	Pick<MomHostBrowserSettings, "enabled" | "cdpPort" | "cdpTarget" | "required" | "autoStartBridge">
+	Pick<MomHostBrowserSettings, "enabled" | "cdpPort" | "cdpTarget" | "required" | "autoStartBridge" | "ensureRunning">
 > = {
 	enabled: false,
 	cdpPort: 9223,
 	cdpTarget: "host.docker.internal:9223",
 	required: false,
 	autoStartBridge: true,
+	ensureRunning: false,
 };
 
 /**

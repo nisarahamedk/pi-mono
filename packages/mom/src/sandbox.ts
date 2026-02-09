@@ -198,6 +198,42 @@ async function probeHostBrowserBridge(
 	return { running, healthy };
 }
 
+async function checkHostCdpReachable(host: string, port: number): Promise<boolean> {
+	const probeHost = host === "host.docker.internal" ? "127.0.0.1" : host;
+	const hostExecutor = new HostExecutor();
+	const cmd = `curl -fsS --max-time 2 http://${probeHost}:${port}/json/version >/dev/null`;
+	const result = await hostExecutor.exec(cmd, { timeout: 4 });
+	return result.code === 0;
+}
+
+async function ensureHostBrowserRunning(
+	host: string,
+	port: number,
+	hostBrowser: ReturnType<MomSettingsManager["getHostBrowserSettings"]>,
+): Promise<void> {
+	if (!hostBrowser.enabled || !hostBrowser.ensureRunning) return;
+	if (!hostBrowser.launchCommand || hostBrowser.launchCommand.trim().length === 0) return;
+
+	if (await checkHostCdpReachable(host, port)) return;
+
+	const hostExecutor = new HostExecutor();
+	const launchResult = await hostExecutor.exec(hostBrowser.launchCommand, { timeout: 20 });
+	if (launchResult.code !== 0) {
+		const msg = `Failed to launch host browser via hostBrowser.launchCommand`;
+		if (hostBrowser.required) throw new Error(`${msg}. ${launchResult.stderr || launchResult.stdout}`.trim());
+		sandboxLog(`${msg}. Continuing without host browser.`);
+		return;
+	}
+	for (let i = 0; i < 12; i++) {
+		if (await checkHostCdpReachable(host, port)) return;
+		await new Promise((r) => setTimeout(r, 500));
+	}
+
+	const msg = `Host browser launch command ran but CDP is still unavailable at ${host}:${port}`;
+	if (hostBrowser.required) throw new Error(msg);
+	sandboxLog(`${msg}. Continuing without host browser.`);
+}
+
 function parseHostPort(target: string): { host: string; port: number } {
 	const idx = target.lastIndexOf(":");
 	if (idx === -1) return { host: target, port: 9223 };
@@ -284,6 +320,7 @@ async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox
 	const cdpTarget = hostBrowser.cdpTarget ?? "host.docker.internal:9223";
 	const hostExecutor = new HostExecutor();
 	const parsedTarget = parseHostPort(cdpTarget);
+	await ensureHostBrowserRunning(parsedTarget.host, parsedTarget.port, hostBrowser);
 	let effectiveTarget = cdpTarget;
 
 	// In vibesilo networks, sandbox often can't directly resolve/reach host.docker.internal.

@@ -44,7 +44,9 @@ mom --sandbox=docker:mom-sandbox ./data
     "cdpPort": 9223,
     "cdpTarget": "host.docker.internal:9223",
     "required": false,
-    "autoStartBridge": true
+    "autoStartBridge": true,
+    "ensureRunning": false,
+    "launchCommand": ""
   }
 }
 ```
@@ -62,6 +64,7 @@ Notes:
 - The actual secret value is never written to disk; only placeholders exist inside the sandbox.
 - Optional `hostBrowser` enables a localhost CDP bridge inside the sandbox (`127.0.0.1:<cdpPort>` -> `<cdpTarget>`), useful for tools that hardcode `127.0.0.1`.
 - `hostBrowser.required=true` makes runs fail fast if the bridge/CDP endpoint is unavailable.
+- Optional lifecycle automation: set `hostBrowser.ensureRunning=true` and provide `hostBrowser.launchCommand` so mom auto-starts host Chrome CDP when unavailable.
 
 ## How It Works
 
