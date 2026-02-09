@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM node:20-bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -41,5 +42,12 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     PUPPETEER_SKIP_DOWNLOAD=1
 
 # Install browser automation CLI.
-# Note: use system chromium via --executable-path /usr/bin/chromium when needed.
-RUN npm install -g agent-browser
+# Note: use host-browser CDP bridge (127.0.0.1:<port>) for tools that require local CDP.
+ARG UPWORK_CLI_TGZ=upwork-cli.tgz
+RUN --mount=type=bind,source=packages/mom/docker,target=/tmp/dockerctx \
+    npm install -g agent-browser \
+ && if [ -f "/tmp/dockerctx/${UPWORK_CLI_TGZ}" ]; then \
+      npm install -g "/tmp/dockerctx/${UPWORK_CLI_TGZ}"; \
+    else \
+      echo "No ${UPWORK_CLI_TGZ} found in packages/mom/docker; skipping upwork-cli install"; \
+    fi
