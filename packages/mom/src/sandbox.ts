@@ -234,6 +234,16 @@ async function ensureHostBrowserRunning(
 	sandboxLog(`${msg}. Continuing without host browser.`);
 }
 
+export async function ensureHostBrowserAtGatewayStart(config: SandboxConfig, hostWorkspaceDir: string): Promise<void> {
+	if (config.type !== "vibesilo") return;
+	const settings = new MomSettingsManager(hostWorkspaceDir);
+	const hostBrowser = settings.getHostBrowserSettings();
+	if (!hostBrowser.enabled || !hostBrowser.ensureRunning) return;
+	const cdpTarget = hostBrowser.cdpTarget ?? "host.docker.internal:9223";
+	const parsedTarget = parseHostPort(cdpTarget);
+	await ensureHostBrowserRunning(parsedTarget.host, parsedTarget.port, hostBrowser);
+}
+
 function parseHostPort(target: string): { host: string; port: number } {
 	const idx = target.lastIndexOf(":");
 	if (idx === -1) return { host: target, port: 9223 };

@@ -6,7 +6,13 @@ import { downloadChannel } from "./download.js";
 import { createEventsWatcher } from "./events.js";
 import * as log from "./log.js";
 import { startRpcServer } from "./rpc-server.js";
-import { parseSandboxArg, type SandboxConfig, shutdownSandbox, validateSandbox } from "./sandbox.js";
+import {
+	ensureHostBrowserAtGatewayStart,
+	parseSandboxArg,
+	type SandboxConfig,
+	shutdownSandbox,
+	validateSandbox,
+} from "./sandbox.js";
 import { type MomHandler, type SlackBot, SlackBot as SlackBotClass, type SlackEvent } from "./slack.js";
 import { ChannelStore } from "./store.js";
 
@@ -91,6 +97,7 @@ if (!rpcOnly && (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN)) {
 }
 
 await validateSandbox(sandbox, workingDir);
+await ensureHostBrowserAtGatewayStart(sandbox, workingDir);
 
 // ============================================================================
 // State (per channel)
