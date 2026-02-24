@@ -122,6 +122,7 @@ export async function shutdownSandbox(config: SandboxConfig): Promise<void> {
 		vibesiloHostWorkspaceDir = null;
 		vibesiloPlaceholders = null;
 		vibesiloBridgeKey = null;
+		vibesiloUpworkInitKey = null;
 	}
 }
 
@@ -155,6 +156,7 @@ let vibesiloSandboxCreating: Promise<VibesiloSandbox> | null = null;
 let vibesiloHostWorkspaceDir: string | null = null;
 let vibesiloPlaceholders: Record<string, string> | null = null;
 let vibesiloBridgeKey: string | null = null;
+let vibesiloUpworkInitKey: string | null = null;
 
 export interface HostBrowserStatus {
 	configured: boolean;
@@ -404,6 +406,53 @@ async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox
 	}
 }
 
+async function ensureVibesiloUpworkCliInit(hostWorkspaceDir: string, sandbox: VibesiloSandbox): Promise<void> {
+	const settings = new MomSettingsManager(hostWorkspaceDir);
+	const hostBrowser = settings.getHostBrowserSettings();
+	if (!hostBrowser.enabled) return;
+
+	const cdpPort = hostBrowser.cdpPort ?? 9223;
+	const initKey = `${sandbox.containerId}:${cdpPort}`;
+	if (vibesiloUpworkInitKey === initKey) return;
+
+	const hostExecutor = new HostExecutor();
+	const hasUpworkCli = await hostExecutor.exec(
+		`docker exec ${sandbox.containerId} sh -lc ${shellEscape("command -v upwork-cli >/dev/null 2>&1")}`,
+		{ timeout: 8 },
+	);
+	if (hasUpworkCli.code !== 0) {
+		throw new Error(
+			"upwork-cli is not installed in the vibesilo sandbox image. Build mom-vibesilo-tools with upwork-cli.",
+		);
+	}
+
+	const initCommand = `upwork-cli init --cdp docker --cdp-port ${cdpPort}`;
+	let initResult = await hostExecutor.exec(`docker exec ${sandbox.containerId} sh -lc ${shellEscape(initCommand)}`, {
+		timeout: 60,
+	});
+	if (initResult.code !== 0) {
+		// In some Docker network setups host.docker.internal is not resolvable inside the sandbox.
+		// Fall back to explicit localhost CDP target (the bridge is already on 127.0.0.1:<cdpPort>).
+		const fallbackCommand = `upwork-cli init --cdp 127.0.0.1:${cdpPort} --cdp-port ${cdpPort}`;
+		const fallback = await hostExecutor.exec(
+			`docker exec ${sandbox.containerId} sh -lc ${shellEscape(fallbackCommand)}`,
+			{
+				timeout: 60,
+			},
+		);
+		if (fallback.code !== 0) {
+			throw new Error(`Failed to initialize upwork-cli CDP mode. ${fallback.stderr || fallback.stdout}`.trim());
+		}
+		sandboxLog(
+			`upwork-cli docker auto-discovery failed, using explicit localhost CDP target 127.0.0.1:${cdpPort} instead.`,
+		);
+		initResult = fallback;
+	}
+
+	vibesiloUpworkInitKey = initKey;
+	sandboxLog(`Initialized upwork-cli CDP mode on 127.0.0.1:${cdpPort}`);
+}
+
 export async function getHostBrowserStatus(
 	config: SandboxConfig,
 	hostWorkspaceDir: string,
@@ -508,6 +557,7 @@ async function getOrCreateVibesiloSandbox(hostWorkspaceDir: string): Promise<Vib
 		vibesiloSandbox = sandbox;
 		vibesiloPlaceholders = sandbox.placeholders;
 		await ensureVibesiloHostBrowserBridge(hostWorkspaceDir, sandbox);
+		await ensureVibesiloUpworkCliInit(hostWorkspaceDir, sandbox);
 		return sandbox;
 	})();
 
@@ -518,17 +568,24 @@ async function getOrCreateVibesiloSandbox(hostWorkspaceDir: string): Promise<Vib
 	}
 }
 
+function buildContainerShellCommand(command: string): string {
+	const wrapped = `if command -v bash >/dev/null 2>&1; then exec bash -lc ${shellEscape(command)}; else exec sh -c ${shellEscape(command)}; fi`;
+	return `sh -lc ${shellEscape(wrapped)}`;
+}
+
 class VibesiloExecutor implements Executor {
 	constructor(private hostWorkspaceDir: string) {}
 
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
 		const sandbox = await getOrCreateVibesiloSandbox(this.hostWorkspaceDir);
 		await ensureVibesiloHostBrowserBridge(this.hostWorkspaceDir, sandbox);
+		await ensureVibesiloUpworkCliInit(this.hostWorkspaceDir, sandbox);
 		const placeholders = vibesiloPlaceholders ?? {};
 		const envFlags = Object.entries(placeholders)
 			.map(([name, value]) => `-e ${shellEscape(`${name}=${value}`)}`)
 			.join(" ");
-		const dockerCmd = `docker exec${envFlags ? ` ${envFlags}` : ""} ${sandbox.containerId} sh -c ${shellEscape(command)}`;
+		const shellCmd = buildContainerShellCommand(command);
+		const dockerCmd = `docker exec${envFlags ? ` ${envFlags}` : ""} ${sandbox.containerId} ${shellCmd}`;
 		const hostExecutor = new HostExecutor();
 		return hostExecutor.exec(dockerCmd, options);
 	}
@@ -622,8 +679,9 @@ class DockerExecutor implements Executor {
 	constructor(private container: string) {}
 
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
-		// Wrap command for docker exec
-		const dockerCmd = `docker exec ${this.container} sh -c ${shellEscape(command)}`;
+		// Wrap command for docker exec (prefer bash when available, fallback to sh)
+		const shellCmd = buildContainerShellCommand(command);
+		const dockerCmd = `docker exec ${this.container} ${shellCmd}`;
 		const hostExecutor = new HostExecutor();
 		return hostExecutor.exec(dockerCmd, options);
 	}
@@ -658,6 +716,6 @@ function killProcessTree(pid: number): void {
 }
 
 function shellEscape(s: string): string {
-	// Escape for passing to sh -c
+	// POSIX single-quote escaping for shell command arguments
 	return `'${s.replace(/'/g, "'\\''")}'`;
 }

@@ -1,6 +1,6 @@
 import type { AgentState } from "@mariozechner/pi-agent-core";
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { basename, dirname, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.js";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.js";
 import type { ToolInfo } from "../extensions/types.js";
@@ -173,6 +173,40 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 /** Built-in tool names that have custom rendering in template.js */
 const BUILTIN_TOOLS = new Set(["bash", "read", "write", "edit", "ls", "find", "grep"]);
 
+function loadSupplementalPromptData(inputPath: string): {
+	systemPrompt?: string;
+	tools?: { name: string; description: string }[];
+} {
+	const sidecarPath = join(dirname(inputPath), "last_prompt.jsonl");
+	if (!existsSync(sidecarPath)) return {};
+
+	try {
+		const parsed = JSON.parse(readFileSync(sidecarPath, "utf-8")) as {
+			systemPrompt?: unknown;
+			tools?: unknown;
+		};
+
+		const systemPrompt = typeof parsed.systemPrompt === "string" ? parsed.systemPrompt : undefined;
+		const tools = Array.isArray(parsed.tools)
+			? parsed.tools
+					.map((t) => {
+						if (!t || typeof t !== "object") return undefined;
+						const tool = t as { name?: unknown; description?: unknown };
+						if (typeof tool.name !== "string") return undefined;
+						return {
+							name: tool.name,
+							description: typeof tool.description === "string" ? tool.description : "",
+						};
+					})
+					.filter((t): t is { name: string; description: string } => t !== undefined)
+			: undefined;
+
+		return { systemPrompt, tools };
+	} catch {
+		return {};
+	}
+}
+
 /**
  * Pre-render custom tools to HTML using their TUI renderers.
  */
@@ -283,12 +317,13 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	const sm = SessionManager.open(inputPath);
 
+	const supplemental = loadSupplementalPromptData(inputPath);
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
 		entries: sm.getEntries(),
 		leafId: sm.getLeafId(),
-		systemPrompt: undefined,
-		tools: undefined,
+		systemPrompt: supplemental.systemPrompt,
+		tools: supplemental.tools,
 	};
 
 	const html = generateHtml(sessionData, opts.themeName);
