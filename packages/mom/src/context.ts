@@ -181,11 +181,18 @@ export interface MomVibesiloSecretSettings {
 	hosts: string[];
 }
 
+export interface MomVibesiloPortMapping {
+	hostPort: number;
+	containerPort: number;
+	bindAddress?: string;
+}
+
 export interface MomVibesiloSettings {
 	image?: string;
 	/** Outbound allow list. Important: vibesilo treats an empty list as allow-all, so mom should require this when enabled. */
 	allowNet?: string[];
 	secrets?: Record<string, MomVibesiloSecretSettings>;
+	portMappings?: MomVibesiloPortMapping[];
 	debugInjectHeader?: boolean;
 }
 

@@ -539,7 +539,9 @@ function createRunner(
 
 	// Create AuthStorage and ModelRegistry
 	// Auth stored outside workspace so agent can't access it
-	const authStorage = AuthStorage.create(join(homedir(), ".pi", "mom", "auth.json"));
+	const authStorage = (AuthStorage as unknown as { create: (path: string) => AuthStorage }).create(
+		join(homedir(), ".pi", "mom", "auth.json"),
+	);
 	const modelRegistry = new ModelRegistry(authStorage);
 
 	// Load existing messages (also contains last selected model/thinking level)
@@ -874,11 +876,24 @@ function createRunner(
 				},
 				enqueueMessage(text: string, target: "main" | "thread", errorContext: string, doLog = true): void {
 					const parts = splitForSlack(text);
+					if (target === "main") {
+						if (parts.length === 0) return;
+						if (parts.length === 1) {
+							this.enqueue(() => ctx.respond(parts[0], doLog), errorContext);
+							return;
+						}
+
+						const head = `${parts[0]}\n\n_(continued in thread)_`;
+						this.enqueue(() => ctx.respond(head, doLog), errorContext);
+						for (let i = 1; i < parts.length; i++) {
+							const part = parts[i];
+							this.enqueue(() => ctx.respondInThread(part), `${errorContext} (thread continuation)`);
+						}
+						return;
+					}
+
 					for (const part of parts) {
-						this.enqueue(
-							() => (target === "main" ? ctx.respond(part, doLog) : ctx.respondInThread(part)),
-							errorContext,
-						);
+						this.enqueue(() => ctx.respondInThread(part), errorContext);
 					}
 				},
 			};

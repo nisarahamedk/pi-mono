@@ -95,6 +95,7 @@ const sandbox = await Sandbox.create({
   image: "node:20-bookworm",
   allowNet: ["api.github.com"],
   mounts: [{ host: ".", guest: "/workspace", readOnly: false }],
+  portMappings: [{ hostPort: 18501, containerPort: 8501, bindAddress: "127.0.0.1" }],
   secrets: {
     GH_TOKEN: {
       hosts: ["api.github.com"],
@@ -112,6 +113,7 @@ await sandbox.close();
 
 - `--mount-auth` mounts `~/.pi/agent/auth.json` into the sandbox as read-only.
 - Mounts default to read-only unless you specify `:rw` or `readOnly: false`.
+- `portMappings` publishes sandbox ports to host via Docker `-p` (for local dashboards/services).
 - `debugInjectHeader` adds a response header to prove injection during tests.
   Leave it off in normal runs.
 

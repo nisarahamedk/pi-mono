@@ -9,12 +9,19 @@ export type MountConfig = {
 	readOnly?: boolean;
 };
 
+export type PortMapping = {
+	hostPort: number;
+	containerPort: number;
+	bindAddress?: string;
+};
+
 export type SandboxOptions = {
 	image: string;
 	allowNet?: string[];
 	secrets?: Record<string, SecretConfig>;
 	env?: Record<string, string>;
 	mounts?: MountConfig[];
+	portMappings?: PortMapping[];
 	name?: string;
 	debugInjectHeader?: boolean;
 };
@@ -25,6 +32,7 @@ export type SandboxProfile = {
 	secrets?: Record<string, SecretConfig>;
 	env?: Record<string, string>;
 	mounts?: MountConfig[];
+	portMappings?: PortMapping[];
 	name?: string;
 	debugInjectHeader?: boolean;
 };

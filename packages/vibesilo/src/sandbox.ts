@@ -108,6 +108,7 @@ export class Sandbox {
 	private networkInternal: string;
 	private proxyContainer: string;
 	private sandboxContainer: string;
+	private relayContainers: string[] = [];
 	private placeholderEnv: Record<string, string> = {};
 
 	private constructor(id: string, options: SandboxOptions) {
@@ -154,6 +155,9 @@ export class Sandbox {
 	}
 
 	async close() {
+		for (const relay of this.relayContainers) {
+			await dockerQuiet(["rm", "-f", relay]);
+		}
 		await dockerQuiet(["rm", "-f", this.sandboxContainer]);
 		await dockerQuiet(["rm", "-f", this.proxyContainer]);
 		await dockerQuiet(["network", "rm", this.networkInternal]);
@@ -179,6 +183,33 @@ export class Sandbox {
 			args.push("-v", `${hostPath}:${mount.guest}:${suffix}`);
 		}
 		return args;
+	}
+
+	private async startPortRelays(): Promise<void> {
+		const mappings = this.options.portMappings;
+		if (!mappings || mappings.length === 0) return;
+
+		for (const mapping of mappings) {
+			const bindAddress = mapping.bindAddress?.trim() || "127.0.0.1";
+			const relayName = `${this.sandboxContainer}-relay-${mapping.hostPort}`;
+			this.relayContainers.push(relayName);
+			await docker([
+				"run",
+				"-d",
+				"--name",
+				relayName,
+				"--network",
+				"bridge",
+				"-p",
+				`${bindAddress}:${mapping.hostPort}:${mapping.hostPort}`,
+				"alpine/socat",
+				"-d",
+				"-d",
+				`TCP-LISTEN:${mapping.hostPort},fork,reuseaddr`,
+				`TCP:${this.sandboxContainer}:${mapping.containerPort}`,
+			]);
+			await docker(["network", "connect", this.networkInternal, relayName]);
+		}
 	}
 
 	private async start() {
@@ -310,5 +341,7 @@ export class Sandbox {
 			"-lc",
 			installCertScript,
 		]);
+
+		await this.startPortRelays();
 	}
 }

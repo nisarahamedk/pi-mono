@@ -62,6 +62,12 @@ export async function validateSandbox(config: SandboxConfig, hostWorkspaceDir: s
 			);
 			process.exit(1);
 		}
+		try {
+			validateVibesiloPortMappings(vibesilo.portMappings);
+		} catch (err) {
+			console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+			process.exit(1);
+		}
 		console.log(`  Vibesilo sandbox enabled (image: ${vibesilo.image ?? "node:20-bookworm"})`);
 		return;
 	}
@@ -510,6 +516,28 @@ export async function getHostBrowserStatus(
 	}
 }
 
+function isValidPort(value: number): boolean {
+	return Number.isInteger(value) && value > 0 && value <= 65535;
+}
+
+function validateVibesiloPortMappings(
+	portMappings: { hostPort: number; containerPort: number; bindAddress?: string }[] | undefined,
+): void {
+	if (!portMappings || portMappings.length === 0) return;
+	const seen = new Set<number>();
+	for (const mapping of portMappings) {
+		if (!isValidPort(mapping.hostPort) || !isValidPort(mapping.containerPort)) {
+			throw new Error(
+				`vibesilo.portMappings contains invalid ports: hostPort=${mapping.hostPort}, containerPort=${mapping.containerPort}`,
+			);
+		}
+		if (seen.has(mapping.hostPort)) {
+			throw new Error(`vibesilo.portMappings contains duplicate hostPort ${mapping.hostPort}`);
+		}
+		seen.add(mapping.hostPort);
+	}
+}
+
 async function getOrCreateVibesiloSandbox(hostWorkspaceDir: string): Promise<VibesiloSandbox> {
 	if (vibesiloSandbox) return vibesiloSandbox;
 	if (vibesiloSandboxCreating) return vibesiloSandboxCreating;
@@ -531,6 +559,7 @@ async function getOrCreateVibesiloSandbox(hostWorkspaceDir: string): Promise<Vib
 				"vibesilo sandbox requires non-empty settings.json vibesilo.allowNet (empty means allow-all in vibesilo)",
 			);
 		}
+		validateVibesiloPortMappings(vibesilo.portMappings);
 
 		const secrets: Record<string, { hosts: string[]; value: string }> = {};
 		if (vibesilo.secrets) {
@@ -551,6 +580,7 @@ async function getOrCreateVibesiloSandbox(hostWorkspaceDir: string): Promise<Vib
 			allowNet,
 			debugInjectHeader: vibesilo.debugInjectHeader ?? false,
 			mounts: [{ host: hostWorkspaceDir, guest: "/workspace", readOnly: false }],
+			portMappings: vibesilo.portMappings,
 			secrets,
 		});
 

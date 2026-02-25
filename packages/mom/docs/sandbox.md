@@ -35,6 +35,9 @@ mom --sandbox=docker:mom-sandbox ./data
   "vibesilo": {
     "image": "node:20-bookworm",
     "allowNet": ["api.github.com"],
+    "portMappings": [
+      { "hostPort": 18501, "containerPort": 8501, "bindAddress": "127.0.0.1" }
+    ],
     "secrets": {
       "GITHUB_TOKEN": { "fromEnv": "GITHUB_TOKEN", "hosts": ["api.github.com"] }
     }
@@ -63,6 +66,7 @@ Notes:
 - The vibesilo sandbox is created when the first tool runs and is torn down when mom exits.
 - The actual secret value is never written to disk; only placeholders exist inside the sandbox.
 - Optional `hostBrowser` enables a localhost CDP bridge inside the sandbox (`127.0.0.1:<cdpPort>` -> `<cdpTarget>`), useful for tools that hardcode `127.0.0.1`.
+- Optional `vibesilo.portMappings` publishes sandbox ports to host (e.g. Streamlit on container `8501` -> host `127.0.0.1:18501`).
 - `hostBrowser.required=true` makes runs fail fast if the bridge/CDP endpoint is unavailable.
 - Optional lifecycle automation: set `hostBrowser.ensureRunning=true` and provide `hostBrowser.launchCommand` so mom auto-starts host Chrome CDP during gateway startup (and re-checks later if unavailable).
 

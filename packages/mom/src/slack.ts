@@ -78,7 +78,7 @@ export interface MomHandler {
 	/**
 	 * Check if channel is currently running (SYNC)
 	 */
-	isRunning(channelId: string): boolean;
+	isRunning(channelId: string, threadTs: string): boolean;
 
 	/**
 	 * Handle an event that triggers mom (ASYNC)
@@ -91,11 +91,11 @@ export interface MomHandler {
 	 * Handle stop command (ASYNC)
 	 * Called when user says "stop" while mom is running
 	 */
-	handleStop(channelId: string, slack: SlackBot): Promise<void>;
+	handleStop(channelId: string, threadTs: string, slack: SlackBot): Promise<void>;
 }
 
 // ============================================================================
-// Per-channel queue for sequential processing
+// Per-thread queue for sequential processing
 // ============================================================================
 
 type QueuedWork = () => Promise<void>;
@@ -130,6 +130,24 @@ class ChannelQueue {
 // ============================================================================
 // SlackBot
 // ============================================================================
+
+const SLACK_TEXT_RETRY_MAX_BYTES = 28000;
+
+function truncateToSlackBytes(text: string, maxBytes = SLACK_TEXT_RETRY_MAX_BYTES): string {
+	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
+	const suffix = "\n\n_(truncated to fit Slack limits)_";
+	const suffixBytes = Buffer.byteLength(suffix, "utf8");
+	const budget = Math.max(0, maxBytes - suffixBytes);
+	let low = 0;
+	let high = text.length;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		const bytes = Buffer.byteLength(text.slice(0, mid), "utf8");
+		if (bytes <= budget) low = mid;
+		else high = mid - 1;
+	}
+	return `${text.slice(0, low)}${suffix}`;
+}
 
 export class SlackBot {
 	private socketClient: SocketModeClient;
@@ -213,8 +231,16 @@ export class SlackBot {
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, text });
-		return result.ts as string;
+		try {
+			const result = await this.webClient.chat.postMessage({ channel, text });
+			return result.ts as string;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (!msg.includes("msg_too_long")) throw err;
+			const fallback = truncateToSlackBytes(text);
+			const result = await this.webClient.chat.postMessage({ channel, text: fallback });
+			return result.ts as string;
+		}
 	}
 
 	async postEphemeral(channel: string, user: string, text: string): Promise<void> {
@@ -222,7 +248,13 @@ export class SlackBot {
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
-		await this.webClient.chat.update({ channel, ts, text });
+		try {
+			await this.webClient.chat.update({ channel, ts, text });
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (!msg.includes("msg_too_long")) throw err;
+			await this.webClient.chat.update({ channel, ts, text: truncateToSlackBytes(text) });
+		}
 	}
 
 	async deleteMessage(channel: string, ts: string): Promise<void> {
@@ -230,8 +262,16 @@ export class SlackBot {
 	}
 
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text });
-		return result.ts as string;
+		try {
+			const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text });
+			return result.ts as string;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			if (!msg.includes("msg_too_long")) throw err;
+			const fallback = truncateToSlackBytes(text);
+			const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: fallback });
+			return result.ts as string;
+		}
 	}
 
 	async uploadFile(channel: string, filePath: string, title?: string, threadTs?: string): Promise<void> {
@@ -290,7 +330,8 @@ export class SlackBot {
 	 * Returns true if enqueued, false if queue is full (max 5).
 	 */
 	enqueueEvent(event: SlackEvent): boolean {
-		const queue = this.getQueue(event.channel);
+		const threadTs = this.getThreadRootTs(event);
+		const queue = this.getQueue(event.channel, threadTs);
 		if (queue.size() >= 5) {
 			log.logWarning(`Event queue full for ${event.channel}, discarding: ${event.text.substring(0, 50)}`);
 			return false;
@@ -304,11 +345,16 @@ export class SlackBot {
 	// Private - Event Handlers
 	// ==========================================================================
 
-	private getQueue(channelId: string): ChannelQueue {
-		let queue = this.queues.get(channelId);
+	private getThreadRootTs(event: SlackEvent): string {
+		return event.type === "dm" ? "dm" : (event.threadTs ?? event.ts);
+	}
+
+	private getQueue(channelId: string, threadTs: string): ChannelQueue {
+		const key = `${channelId}:${threadTs}`;
+		let queue = this.queues.get(key);
 		if (!queue) {
 			queue = new ChannelQueue();
-			this.queues.set(channelId, queue);
+			this.queues.set(key, queue);
 		}
 		return queue;
 	}
@@ -521,22 +567,23 @@ export class SlackBot {
 			}
 
 			// Check for stop command - execute immediately, don't queue!
+			const threadRoot = e.thread_ts ?? e.ts;
+
 			if (slackEvent.text.toLowerCase().trim() === "stop") {
-				if (this.handler.isRunning(e.channel)) {
-					this.handler.handleStop(e.channel, this); // Don't await, don't queue
+				if (this.handler.isRunning(e.channel, threadRoot)) {
+					this.handler.handleStop(e.channel, threadRoot, this); // Don't await, don't queue
 				} else {
-					this.postMessage(e.channel, "_Nothing running_");
+					this.postInThread(e.channel, threadRoot, "_Nothing running_");
 				}
 				ack();
 				return;
 			}
 
 			// SYNC: Check if busy
-			if (this.handler.isRunning(e.channel)) {
-				const threadRoot = e.thread_ts ?? e.ts;
+			if (this.handler.isRunning(e.channel, threadRoot)) {
 				this.postInThread(e.channel, threadRoot, "_Already working. Say `@mom stop` to cancel._");
 			} else {
-				this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
+				this.getQueue(e.channel, threadRoot).enqueue(() => this.handler.handleEvent(slackEvent, this));
 			}
 
 			ack();
@@ -612,8 +659,8 @@ export class SlackBot {
 			if (isDM) {
 				// Check for stop command - execute immediately, don't queue!
 				if (slackEvent.text.toLowerCase().trim() === "stop") {
-					if (this.handler.isRunning(e.channel)) {
-						this.handler.handleStop(e.channel, this); // Don't await, don't queue
+					if (this.handler.isRunning(e.channel, "dm")) {
+						this.handler.handleStop(e.channel, "dm", this); // Don't await, don't queue
 					} else {
 						this.postMessage(e.channel, "_Nothing running_");
 					}
@@ -621,10 +668,10 @@ export class SlackBot {
 					return;
 				}
 
-				if (this.handler.isRunning(e.channel)) {
+				if (this.handler.isRunning(e.channel, "dm")) {
 					this.postMessage(e.channel, "_Already working. Say `stop` to cancel._");
 				} else {
-					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
+					this.getQueue(e.channel, "dm").enqueue(() => this.handler.handleEvent(slackEvent, this));
 				}
 			} else if (autoTriggerUserAllowed) {
 				// Auto-trigger in channels: top-level messages start a thread, thread replies continue it.
@@ -632,8 +679,8 @@ export class SlackBot {
 
 				// Stop command in channels (if auto-triggering): execute immediately, don't queue!
 				if (slackEvent.text.toLowerCase().trim() === "stop") {
-					if (this.handler.isRunning(e.channel)) {
-						this.handler.handleStop(e.channel, this); // Don't await, don't queue
+					if (this.handler.isRunning(e.channel, threadRoot)) {
+						this.handler.handleStop(e.channel, threadRoot, this); // Don't await, don't queue
 					} else {
 						this.postInThread(e.channel, threadRoot, "_Nothing running_");
 					}
@@ -641,10 +688,10 @@ export class SlackBot {
 					return;
 				}
 
-				if (this.handler.isRunning(e.channel)) {
+				if (this.handler.isRunning(e.channel, threadRoot)) {
 					this.postInThread(e.channel, threadRoot, "_Already working. Say `@mom stop` to cancel._");
 				} else {
-					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
+					this.getQueue(e.channel, threadRoot).enqueue(() => this.handler.handleEvent(slackEvent, this));
 				}
 			}
 
