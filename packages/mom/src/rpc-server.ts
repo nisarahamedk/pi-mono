@@ -64,6 +64,8 @@ export interface RpcServerOptions {
 	sandbox: SandboxConfig;
 	socketPath: string;
 	botToken: string;
+	extensions?: string[];
+	noExtensions?: boolean;
 	onShutdown: (reason: string) => Promise<void>;
 	onRestartSandbox?: () => Promise<void>;
 }
@@ -183,7 +185,8 @@ function sendJson(socket: Socket, obj: RpcResponse | RpcEvent): void {
 }
 
 export async function startRpcServer(options: RpcServerOptions): Promise<RpcServerHandle> {
-	const { workingDir, sandbox, socketPath, botToken, onShutdown, onRestartSandbox } = options;
+	const { workingDir, sandbox, socketPath, botToken, extensions, noExtensions, onShutdown, onRestartSandbox } =
+		options;
 
 	await mkdir(workingDir, { recursive: true });
 
@@ -238,6 +241,8 @@ export async function startRpcServer(options: RpcServerOptions): Promise<RpcServ
 					channelId,
 					`${workingDir}/${channelId}`,
 					req.session,
+					extensions,
+					noExtensions,
 				);
 				runner.abort();
 				sendJson(socket, { type: "response", id: req.id, success: true });
@@ -444,7 +449,14 @@ export async function startRpcServer(options: RpcServerOptions): Promise<RpcServ
 
 				try {
 					await mkdir(`${workingDir}/${channelId}`, { recursive: true });
-					const runner = getOrCreateRunner(sandbox, channelId, `${workingDir}/${channelId}`, threadTs);
+					const runner = getOrCreateRunner(
+						sandbox,
+						channelId,
+						`${workingDir}/${channelId}`,
+						threadTs,
+						extensions,
+						noExtensions,
+					);
 					await ctx.setTyping(true);
 					await ctx.setWorking(true);
 					const result = await runner.run(ctx, store);

@@ -1,4 +1,5 @@
 import type { AgentState } from "@mariozechner/pi-agent-core";
+import type { TSchema } from "@sinclair/typebox";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, dirname, join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.js";
@@ -175,7 +176,7 @@ const BUILTIN_TOOLS = new Set(["bash", "read", "write", "edit", "ls", "find", "g
 
 function loadSupplementalPromptData(inputPath: string): {
 	systemPrompt?: string;
-	tools?: { name: string; description: string }[];
+	tools?: ToolInfo[];
 } {
 	const sidecarPath = join(dirname(inputPath), "last_prompt.jsonl");
 	if (!existsSync(sidecarPath)) return {};
@@ -191,14 +192,15 @@ function loadSupplementalPromptData(inputPath: string): {
 			? parsed.tools
 					.map((t) => {
 						if (!t || typeof t !== "object") return undefined;
-						const tool = t as { name?: unknown; description?: unknown };
+						const tool = t as { name?: unknown; description?: unknown; parameters?: unknown };
 						if (typeof tool.name !== "string") return undefined;
 						return {
 							name: tool.name,
 							description: typeof tool.description === "string" ? tool.description : "",
+							parameters: {} as TSchema,
 						};
 					})
-					.filter((t): t is { name: string; description: string } => t !== undefined)
+					.filter((t): t is ToolInfo => t !== undefined)
 			: undefined;
 
 		return { systemPrompt, tools };

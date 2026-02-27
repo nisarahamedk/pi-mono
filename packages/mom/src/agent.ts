@@ -5,6 +5,7 @@ import {
 	AuthStorage,
 	convertToLlm,
 	createExtensionRuntime,
+	discoverAndLoadExtensions,
 	formatSkillsForPrompt,
 	loadSkillsFromDir,
 	ModelRegistry,
@@ -485,12 +486,14 @@ export function getOrCreateRunner(
 	channelId: string,
 	channelDir: string,
 	threadTs: string,
+	extensionPaths?: string[],
+	noExtensions?: boolean,
 ): AgentRunner {
 	const key = `${channelId}:${threadTs}`;
 	const existing = channelRunners.get(key);
 	if (existing) return existing;
 
-	const runner = createRunner(sandboxConfig, channelId, channelDir, threadTs);
+	const runner = createRunner(sandboxConfig, channelId, channelDir, threadTs, extensionPaths, noExtensions);
 	channelRunners.set(key, runner);
 	return runner;
 }
@@ -504,6 +507,8 @@ function createRunner(
 	channelId: string,
 	channelDir: string,
 	threadTs: string,
+	extensionPaths?: string[],
+	noExtensions?: boolean,
 ): AgentRunner {
 	const hostWorkspaceDir = channelDir.replace(`/${channelId}`, "");
 	const executor = createExecutor(sandboxConfig, hostWorkspaceDir);
@@ -511,21 +516,6 @@ function createRunner(
 
 	// Create tools
 	const tools = createMomTools(executor);
-
-	// Initial system prompt (will be updated each run with fresh memory/channels/users/skills)
-	const agentsProfile = getAgentsProfile(channelDir);
-	const memory = getMemory(channelDir);
-	const skills = loadMomSkills(channelDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(
-		workspacePath,
-		channelId,
-		agentsProfile,
-		memory,
-		sandboxConfig,
-		[],
-		[],
-		skills,
-	);
 
 	// Create session manager and settings manager
 	// Use a fixed context.jsonl file per Slack thread (not timestamped like coding-agent)
@@ -584,6 +574,21 @@ function createRunner(
 
 	log.logInfo(`[${channelId}] Using thinking level ${selectedThinkingLevel}`);
 
+	// Build initial system prompt (will be updated by extension via before_agent_start)
+	const agentsProfile = getAgentsProfile(channelDir);
+	const memory = getMemory(channelDir);
+	const skills = loadMomSkills(channelDir, workspacePath);
+	const systemPrompt = buildSystemPrompt(
+		workspacePath,
+		channelId,
+		agentsProfile,
+		memory,
+		sandboxConfig,
+		[],
+		[],
+		skills,
+	);
+
 	// Create agent
 	const agent = new Agent({
 		initialState: {
@@ -602,8 +607,11 @@ function createRunner(
 		log.logInfo(`[${channelId}] Loaded ${loadedSession.messages.length} messages from context.jsonl`);
 	}
 
+	// Create a ResourceLoader that includes the loaded extensions
+	// Initially empty - will be populated by loadExtensionsOnce() via session.reload()
+	const emptyExtensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 	const resourceLoader: ResourceLoader = {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
+		getExtensions: () => emptyExtensionsResult,
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
@@ -627,6 +635,65 @@ function createRunner(
 		resourceLoader,
 		baseToolsOverride,
 	});
+
+	// Track whether extensions have been bound (loaded lazily on first run)
+	let extensionsLoaded = false;
+	const loadExtensionsOnce = async () => {
+		if (extensionsLoaded || noExtensions) return;
+		extensionsLoaded = true;
+
+		const hostWorkspacePath = join(channelDir, "..");
+		const additionalExtPaths = extensionPaths ?? [];
+
+		log.logInfo(
+			`[${channelId}] Loading extensions from: ${hostWorkspacePath}, plus: ${additionalExtPaths.join(", ")}`,
+		);
+
+		// Only load workspace extensions (no global ~/.pi/agent/extensions/)
+		// Pass a non-existent agentDir to skip global extensions
+		const extResult = await discoverAndLoadExtensions(
+			additionalExtPaths,
+			hostWorkspacePath,
+			"/nonexistent-agent-dir",
+		);
+
+		for (const { path, error } of extResult.errors) {
+			log.logWarning(`[${channelId}] Failed to load extension "${path}": ${error}`);
+		}
+
+		// Apply pending provider registrations to model registry
+		// This MUST happen before model resolution
+		for (const { name, config } of extResult.runtime.pendingProviderRegistrations) {
+			modelRegistry.registerProvider(name, config);
+			log.logInfo(`[${channelId}] Registered provider: ${name}`);
+		}
+		extResult.runtime.pendingProviderRegistrations = [];
+
+		// Update resource loader with loaded extensions before reload
+		resourceLoader.getExtensions = () => extResult;
+		resourceLoader.reload = async () => {
+			// Reload extensions from disk - skip global extensions
+			const reloaded = await discoverAndLoadExtensions(
+				additionalExtPaths,
+				hostWorkspacePath,
+				"/nonexistent-agent-dir",
+			);
+			resourceLoader.getExtensions = () => reloaded;
+		};
+
+		// bindExtensions sets up bindings (needed for hasBindings in reload)
+		// then reload rebuilds the ExtensionRunner with extensions
+		await session.bindExtensions({
+			onError: (err) => {
+				log.logWarning(`[${channelId}] Extension error (${err.extensionPath}): ${err.error}`);
+			},
+		});
+
+		// Reload to rebuild ExtensionRunner with workspace extensions
+		await session.reload();
+
+		log.logInfo(`[${channelId}] Bound ${extResult.extensions.length} extension(s)`);
+	};
 
 	// Mutable per-run state - event handler references this
 	const runState = {
@@ -798,6 +865,9 @@ function createRunner(
 			_store: ChannelStore,
 			_pendingMessages?: PendingMessage[],
 		): Promise<{ stopReason: string; errorMessage?: string }> {
+			// Load extensions on first run (lazy initialization)
+			await loadExtensionsOnce();
+
 			// Ensure channel directory exists
 			await mkdir(channelDir, { recursive: true });
 
@@ -939,16 +1009,18 @@ function createRunner(
 				userMessage += `\n\n<slack_attachments>\n${nonImagePaths.join("\n")}\n</slack_attachments>`;
 			}
 
+			await session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined);
+
 			// Debug: write context to last_prompt.jsonl
+			// Use the actual system prompt from the agent (may have been modified by extensions)
+			const actualSystemPrompt = session.agent.state.systemPrompt;
 			const debugContext = {
-				systemPrompt,
+				systemPrompt: actualSystemPrompt,
 				messages: session.messages,
 				newUserMessage: userMessage,
 				imageAttachmentCount: imageAttachments.length,
 			};
 			await writeFile(join(threadDir, "last_prompt.jsonl"), JSON.stringify(debugContext, null, 2));
-
-			await session.prompt(userMessage, imageAttachments.length > 0 ? { images: imageAttachments } : undefined);
 
 			// Wait for queued messages
 			await queueChain;

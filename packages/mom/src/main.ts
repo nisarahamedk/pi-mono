@@ -28,6 +28,8 @@ interface ParsedArgs {
 	sandbox: SandboxConfig;
 	downloadChannel?: string;
 	rpcSocket?: string;
+	extensions?: string[];
+	noExtensions?: boolean;
 }
 
 function parseArgs(): ParsedArgs {
@@ -36,6 +38,8 @@ function parseArgs(): ParsedArgs {
 	let workingDir: string | undefined;
 	let downloadChannelId: string | undefined;
 	let rpcSocket: string | undefined;
+	const extensions: string[] = [];
+	let noExtensions = false;
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -51,6 +55,12 @@ function parseArgs(): ParsedArgs {
 			rpcSocket = arg.slice("--rpc-socket=".length);
 		} else if (arg === "--rpc-socket") {
 			rpcSocket = args[++i] || "";
+		} else if (arg === "-e" || arg === "--extension") {
+			extensions.push(args[++i]);
+		} else if (arg.startsWith("--extension=")) {
+			extensions.push(arg.slice("--extension=".length));
+		} else if (arg === "--no-extensions") {
+			noExtensions = true;
 		} else if (!arg.startsWith("-")) {
 			workingDir = arg;
 		}
@@ -61,6 +71,8 @@ function parseArgs(): ParsedArgs {
 		sandbox,
 		downloadChannel: downloadChannelId,
 		rpcSocket,
+		extensions: extensions.length > 0 ? extensions : undefined,
+		noExtensions,
 	};
 }
 
@@ -420,7 +432,14 @@ const handler: MomHandler = {
 			state.stopRequested = false;
 
 			const channelDir = join(workingDir, event.channel);
-			const runner = getOrCreateRunner(sandbox, event.channel, channelDir, threadTs);
+			const runner = getOrCreateRunner(
+				sandbox,
+				event.channel,
+				channelDir,
+				threadTs,
+				parsedArgs.extensions,
+				parsedArgs.noExtensions,
+			);
 			state.activeRunner = runner;
 
 			// Create context adapter
@@ -532,6 +551,8 @@ if (rpcSocket !== undefined) {
 		sandbox,
 		socketPath,
 		botToken: MOM_SLACK_BOT_TOKEN!,
+		extensions: parsedArgs.extensions,
+		noExtensions: parsedArgs.noExtensions,
 		onShutdown: shutdown,
 		onRestartSandbox: async () => {
 			if (sandbox.type !== "vibesilo") {
