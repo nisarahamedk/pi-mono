@@ -24,14 +24,16 @@ export type {
 	// Re-exports
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	// App keybindings (for custom editors)
-	AppAction,
 	AppendEntryHandler,
+	// App keybindings (for custom editors)
+	AppKeybinding,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
 	BashToolResultEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeProviderRequestEvent,
+	BeforeProviderRequestEventResult,
 	// Context
 	CompactOptions,
 	// Events - Agent
@@ -112,6 +114,9 @@ export type {
 	SessionBeforeTreeEvent,
 	SessionBeforeTreeResult,
 	SessionCompactEvent,
+	SessionDirectoryEvent,
+	SessionDirectoryHandler,
+	SessionDirectoryResult,
 	SessionEvent,
 	SessionForkEvent,
 	SessionShutdownEvent,
@@ -158,9 +163,4 @@ export {
 	isToolCallEventType,
 	isWriteToolResult,
 } from "./types.js";
-export {
-	wrapRegisteredTool,
-	wrapRegisteredTools,
-	wrapToolsWithExtensions,
-	wrapToolWithExtensions,
-} from "./wrapper.js";
+export { wrapRegisteredTool, wrapRegisteredTools } from "./wrapper.js";

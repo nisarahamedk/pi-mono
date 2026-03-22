@@ -52,10 +52,10 @@ export {
 	type SessionSwitchEvent,
 	type SessionTreeEvent,
 	type ToolCallEvent,
+	type ToolCallEventResult,
 	type ToolDefinition,
 	type ToolRenderResultOptions,
 	type ToolResultEvent,
 	type TurnEndEvent,
 	type TurnStartEvent,
-	wrapToolsWithExtensions,
 } from "./extensions/index.js";

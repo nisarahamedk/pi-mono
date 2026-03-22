@@ -7,9 +7,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
-import { discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
+import { createExtensionRuntime, discoverAndLoadExtensions } from "../src/core/extensions/loader.js";
 import { ExtensionRunner } from "../src/core/extensions/runner.js";
-import { DEFAULT_KEYBINDINGS, type KeyId } from "../src/core/keybindings.js";
+import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.js";
+import { KeybindingsManager, type KeyId } from "../src/core/keybindings.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 
@@ -18,6 +19,7 @@ describe("ExtensionRunner", () => {
 	let extensionsDir: string;
 	let sessionManager: SessionManager;
 	let modelRegistry: ModelRegistry;
+	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-runner-test-"));
@@ -31,6 +33,51 @@ describe("ExtensionRunner", () => {
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
+
+	const providerModelConfig: ProviderConfig = {
+		baseUrl: "https://provider.test/v1",
+		apiKey: "PROVIDER_TEST_KEY",
+		api: "openai-completions",
+		models: [
+			{
+				id: "instant-model",
+				name: "Instant Model",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 4096,
+			},
+		],
+	};
+
+	const extensionActions: ExtensionActions = {
+		sendMessage: () => {},
+		sendUserMessage: () => {},
+		appendEntry: () => {},
+		setSessionName: () => {},
+		getSessionName: () => undefined,
+		setLabel: () => {},
+		getActiveTools: () => [],
+		getAllTools: () => [],
+		setActiveTools: () => {},
+		refreshTools: () => {},
+		getCommands: () => [],
+		setModel: async () => false,
+		getThinkingLevel: () => "off",
+		setThinkingLevel: () => {},
+	};
+
+	const extensionContextActions: ExtensionContextActions = {
+		getModel: () => undefined,
+		isIdle: () => true,
+		abort: () => {},
+		hasPendingMessages: () => false,
+		shutdown: () => {},
+		getContextUsage: () => undefined,
+		compact: () => {},
+		getSystemPrompt: () => "",
+	};
 
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {
@@ -48,7 +95,7 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(DEFAULT_KEYBINDINGS);
+			const shortcuts = runner.getShortcuts(defaultKeybindings);
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
 			expect(shortcuts.has("ctrl+c")).toBe(false);
@@ -71,7 +118,7 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...DEFAULT_KEYBINDINGS, cycleModelForward: "ctrl+n" as KeyId };
+			const keybindings = { ...defaultKeybindings, "app.model.cycleForward": "ctrl+n" as KeyId };
 			const shortcuts = runner.getShortcuts(keybindings);
 
 			expect(shortcuts.has("ctrl+p")).toBe(true);
@@ -81,9 +128,12 @@ describe("ExtensionRunner", () => {
 		});
 
 		it("warns but allows when extension uses non-reserved built-in shortcut", async () => {
+			const pasteImageKey = Array.isArray(defaultKeybindings["app.clipboard.pasteImage"])
+				? (defaultKeybindings["app.clipboard.pasteImage"][0] ?? "")
+				: defaultKeybindings["app.clipboard.pasteImage"];
 			const extCode = `
 				export default function(pi) {
-					pi.registerShortcut("ctrl+v", {
+					pi.registerShortcut("${pasteImageKey}", {
 						description: "Overrides non-reserved",
 						handler: async () => {},
 					});
@@ -95,10 +145,12 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(DEFAULT_KEYBINDINGS);
+			const shortcuts = runner.getShortcuts(defaultKeybindings);
 
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("built-in shortcut for pasteImage"));
-			expect(shortcuts.has("ctrl+v")).toBe(true);
+			expect(warnSpy).toHaveBeenCalledWith(
+				expect.stringContaining("built-in shortcut for app.clipboard.pasteImage"),
+			);
+			expect(shortcuts.has(pasteImageKey as KeyId)).toBe(true);
 
 			warnSpy.mockRestore();
 		});
@@ -118,7 +170,7 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...DEFAULT_KEYBINDINGS, interrupt: "ctrl+x" as KeyId };
+			const keybindings = { ...defaultKeybindings, "app.interrupt": "ctrl+x" as KeyId };
 			const shortcuts = runner.getShortcuts(keybindings);
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
@@ -142,7 +194,7 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...DEFAULT_KEYBINDINGS, clear: ["ctrl+x", "ctrl+y"] as KeyId[] };
+			const keybindings = { ...defaultKeybindings, "app.clear": ["ctrl+x", "ctrl+y"] as KeyId[] };
 			const shortcuts = runner.getShortcuts(keybindings);
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
@@ -166,10 +218,12 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...DEFAULT_KEYBINDINGS, pasteImage: ["ctrl+x", "ctrl+y"] as KeyId[] };
+			const keybindings = { ...defaultKeybindings, "app.clipboard.pasteImage": ["ctrl+x", "ctrl+y"] as KeyId[] };
 			const shortcuts = runner.getShortcuts(keybindings);
 
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("built-in shortcut for pasteImage"));
+			expect(warnSpy).toHaveBeenCalledWith(
+				expect.stringContaining("built-in shortcut for app.clipboard.pasteImage"),
+			);
 			expect(shortcuts.has("ctrl+y")).toBe(true);
 
 			warnSpy.mockRestore();
@@ -200,7 +254,7 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(DEFAULT_KEYBINDINGS);
+			const shortcuts = runner.getShortcuts(defaultKeybindings);
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("shortcut conflict"));
 			// Last one wins
@@ -554,6 +608,70 @@ describe("ExtensionRunner", () => {
 				details: { source: "ext1" },
 				isError: true,
 			});
+		});
+	});
+
+	describe("provider registration", () => {
+		it("bindCore ignores invalid queued registrations and reports extension error", () => {
+			const runtime = createExtensionRuntime();
+			runtime.registerProvider(
+				"broken-provider",
+				{
+					streamSimple: (() => {
+						throw new Error("should not run");
+					}) as any,
+				},
+				"/tmp/broken-extension.ts",
+			);
+
+			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(`${error.extensionPath}: ${error.error}`));
+
+			expect(() => runner.bindCore(extensionActions, extensionContextActions)).not.toThrow();
+			expect(errors).toEqual([
+				'/tmp/broken-extension.ts: Provider broken-provider: "api" is required when registering streamSimple.',
+			]);
+			expect(() => modelRegistry.refresh()).not.toThrow();
+		});
+
+		it("pre-bind unregister removes all queued registrations for a provider", () => {
+			const runtime = createExtensionRuntime();
+
+			runtime.registerProvider("queued-provider", providerModelConfig);
+			runtime.registerProvider("queued-provider", {
+				...providerModelConfig,
+				models: [
+					{
+						id: "instant-model-2",
+						name: "Instant Model 2",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 4096,
+					},
+				],
+			});
+			expect(runtime.pendingProviderRegistrations).toHaveLength(2);
+
+			runtime.unregisterProvider("queued-provider");
+			expect(runtime.pendingProviderRegistrations).toHaveLength(0);
+		});
+
+		it("post-bind register and unregister take effect immediately", () => {
+			const runtime = createExtensionRuntime();
+			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
+
+			runner.bindCore(extensionActions, extensionContextActions);
+			expect(runtime.pendingProviderRegistrations).toHaveLength(0);
+
+			runtime.registerProvider("instant-provider", providerModelConfig);
+			expect(runtime.pendingProviderRegistrations).toHaveLength(0);
+			expect(modelRegistry.find("instant-provider", "instant-model")).toBeDefined();
+
+			runtime.unregisterProvider("instant-provider");
+			expect(modelRegistry.find("instant-provider", "instant-model")).toBeUndefined();
 		});
 	});
 

@@ -14,20 +14,22 @@ import { SessionManager } from "../session-manager.js";
  */
 export interface ToolHtmlRenderer {
 	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolName: string, args: unknown): string | undefined;
-	/** Render a tool result to HTML. Returns undefined if tool has no custom renderer. */
+	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
+	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
 	renderResult(
+		toolCallId: string,
 		toolName: string,
 		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 		details: unknown,
 		isError: boolean,
-	): string | undefined;
+	): { collapsed?: string; expanded?: string } | undefined;
 }
 
 /** Pre-rendered HTML for a custom tool call and result */
 interface RenderedToolHtml {
 	callHtml?: string;
-	resultHtml?: string;
+	resultHtmlCollapsed?: string;
+	resultHtmlExpanded?: string;
 }
 
 export interface ExportOptions {
@@ -226,7 +228,7 @@ function preRenderCustomTools(
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
 				if (block.type === "toolCall" && !BUILTIN_TOOLS.has(block.name)) {
-					const callHtml = toolRenderer.renderCall(block.name, block.arguments);
+					const callHtml = toolRenderer.renderCall(block.id, block.name, block.arguments);
 					if (callHtml) {
 						renderedTools[block.id] = { callHtml };
 					}
@@ -240,11 +242,18 @@ function preRenderCustomTools(
 			// Only render if we have a pre-rendered call OR it's not a built-in tool
 			const existing = renderedTools[msg.toolCallId];
 			if (existing || !BUILTIN_TOOLS.has(toolName)) {
-				const resultHtml = toolRenderer.renderResult(toolName, msg.content, msg.details, msg.isError || false);
-				if (resultHtml) {
+				const rendered = toolRenderer.renderResult(
+					msg.toolCallId,
+					toolName,
+					msg.content,
+					msg.details,
+					msg.isError || false,
+				);
+				if (rendered) {
 					renderedTools[msg.toolCallId] = {
 						...existing,
-						resultHtml,
+						resultHtmlCollapsed: rendered.collapsed,
+						resultHtmlExpanded: rendered.expanded,
 					};
 				}
 			}
