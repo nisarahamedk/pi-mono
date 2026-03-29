@@ -101,6 +101,9 @@ const { workingDir, sandbox, rpcSocket } = {
 	rpcSocket: parsedArgs.rpcSocket,
 };
 
+// Use workspace as cwd so relative paths resolve correctly (MCP config, AgentSession, etc.)
+process.chdir(workingDir);
+
 const rpcOnly = rpcSocket !== undefined && (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN);
 
 if (!rpcOnly && (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN)) {

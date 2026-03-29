@@ -603,6 +603,12 @@ function buildContainerShellCommand(command: string): string {
 	return `sh -lc ${shellEscape(wrapped)}`;
 }
 
+function buildDockerExecEnvFlags(env: Record<string, string>): string {
+	return Object.entries(env)
+		.map(([name, value]) => `-e ${shellEscape(`${name}=${value}`)}`)
+		.join(" ");
+}
+
 class VibesiloExecutor implements Executor {
 	constructor(private hostWorkspaceDir: string) {}
 
@@ -610,10 +616,10 @@ class VibesiloExecutor implements Executor {
 		const sandbox = await getOrCreateVibesiloSandbox(this.hostWorkspaceDir);
 		await ensureVibesiloHostBrowserBridge(this.hostWorkspaceDir, sandbox);
 		await ensureVibesiloUpworkCliInit(this.hostWorkspaceDir, sandbox);
-		const placeholders = vibesiloPlaceholders ?? {};
-		const envFlags = Object.entries(placeholders)
-			.map(([name, value]) => `-e ${shellEscape(`${name}=${value}`)}`)
-			.join(" ");
+		const envFlags = buildDockerExecEnvFlags({
+			...(vibesiloPlaceholders ?? {}),
+			WORKSPACE: "/workspace",
+		});
 		const shellCmd = buildContainerShellCommand(command);
 		const dockerCmd = `docker exec${envFlags ? ` ${envFlags}` : ""} ${sandbox.containerId} ${shellCmd}`;
 		const hostExecutor = new HostExecutor();
@@ -711,7 +717,8 @@ class DockerExecutor implements Executor {
 	async exec(command: string, options?: ExecOptions): Promise<ExecResult> {
 		// Wrap command for docker exec (prefer bash when available, fallback to sh)
 		const shellCmd = buildContainerShellCommand(command);
-		const dockerCmd = `docker exec ${this.container} ${shellCmd}`;
+		const envFlags = buildDockerExecEnvFlags({ WORKSPACE: "/workspace" });
+		const dockerCmd = `docker exec${envFlags ? ` ${envFlags}` : ""} ${this.container} ${shellCmd}`;
 		const hostExecutor = new HostExecutor();
 		return hostExecutor.exec(dockerCmd, options);
 	}

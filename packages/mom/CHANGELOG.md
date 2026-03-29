@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a generic workspace subagent runtime to mom with fresh/fork child `pi` subprocesses, parent-thread observability, and session-viewer drill-down support
+
+### Fixed
+
+- Fixed subagent sandbox exec environment to expose `WORKSPACE=/workspace` and added tool-surface diagnostics for child MCP/judge investigations
+- Fixed subagent result persistence so `result.json` stores the full child summary while parent/tool output remains truncated for display
+- Fixed subagent result and artifact paths to use the selected execution surface path semantics (`/workspace` in sandboxed runs) instead of leaking host filesystem paths
+
 ## [0.61.1] - 2026-03-20
 
 ## [0.61.0] - 2026-03-20

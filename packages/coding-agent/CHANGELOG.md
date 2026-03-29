@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Fixed print/json mode to wait for queued `AgentSession` event processing after prompts, so late async extension work triggered by tool events completes before process exit
 - Fixed `pi update` for git packages to skip destructive reset, clean, and reinstall steps when the fetched target already matches the local checkout ([#2503](https://github.com/badlogic/pi-mono/issues/2503))
 
 ## [0.61.1] - 2026-03-20

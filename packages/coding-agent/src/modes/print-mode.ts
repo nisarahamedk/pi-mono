@@ -83,11 +83,13 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// Send initial message with attachments
 	if (initialMessage) {
 		await session.prompt(initialMessage, { images: initialImages });
+		await session.waitForSettled();
 	}
 
 	// Send remaining messages
 	for (const message of messages) {
 		await session.prompt(message);
+		await session.waitForSettled();
 	}
 
 	// In text mode, output final response

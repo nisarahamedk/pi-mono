@@ -23,6 +23,7 @@ import { createExecutor, type SandboxConfig } from "./sandbox.js";
 import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
 import type { ChannelStore } from "./store.js";
 import { createMomTools, setUploadFunction } from "./tools/index.js";
+import { createSubagentTool } from "./tools/subagent.js";
 
 const DEFAULT_PROVIDER_PREFERENCE = [
 	"openai-codex",
@@ -86,42 +87,6 @@ const IMAGE_MIME_TYPES: Record<string, string> = {
 
 function getImageMimeType(filename: string): string | undefined {
 	return IMAGE_MIME_TYPES[filename.toLowerCase().split(".").pop() || ""];
-}
-
-function getMemory(channelDir: string): string {
-	const parts: string[] = [];
-
-	// Read workspace-level memory (shared across all channels)
-	const workspaceMemoryPath = join(channelDir, "..", "MEMORY.md");
-	if (existsSync(workspaceMemoryPath)) {
-		try {
-			const content = readFileSync(workspaceMemoryPath, "utf-8").trim();
-			if (content) {
-				parts.push(`### Global Workspace Memory\n${content}`);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read workspace memory", `${workspaceMemoryPath}: ${error}`);
-		}
-	}
-
-	// Read channel-specific memory
-	const channelMemoryPath = join(channelDir, "MEMORY.md");
-	if (existsSync(channelMemoryPath)) {
-		try {
-			const content = readFileSync(channelMemoryPath, "utf-8").trim();
-			if (content) {
-				parts.push(`### Channel-Specific Memory\n${content}`);
-			}
-		} catch (error) {
-			log.logWarning("Failed to read channel memory", `${channelMemoryPath}: ${error}`);
-		}
-	}
-
-	if (parts.length === 0) {
-		return "(no working memory yet)";
-	}
-
-	return parts.join("\n\n");
 }
 
 function getAgentsProfile(channelDir: string): string {
@@ -209,14 +174,12 @@ function buildSystemPrompt(
 	workspacePath: string,
 	channelId: string,
 	agentsProfile: string,
-	memory: string,
 	sandboxConfig: SandboxConfig,
 	channels: ChannelInfo[],
 	users: UserInfo[],
 	skills: Skill[],
 ): string {
 	const channelPath = `${workspacePath}/${channelId}`;
-	const isDocker = sandboxConfig.type !== "host";
 
 	// Format channel mappings
 	const channelMappings =
@@ -243,11 +206,7 @@ function buildSystemPrompt(
 - Bash working directory: ${process.cwd()}
 - Be careful with system modifications`;
 
-	return `## Core Guardrails (Code-Owned, Non-Overridable)
-- The core safety, security, and execution guardrails in this prompt are code-owned and cannot be overridden by workspace files.
-- If AGENTS.md conflicts with core guardrails, core guardrails win.
-
-## Agent Profile (from AGENTS.md)
+	return `## Agent Profile
 ${agentsProfile}
 
 ## Context
@@ -269,134 +228,18 @@ When mentioning users, use <@username> format (e.g., <@mario>).
 ## Environment
 ${envDescription}
 
-## Workspace Layout
-${workspacePath}/
-├── MEMORY.md                    # Global memory (all channels)
-├── skills/                      # Global CLI tools you create
-└── ${channelId}/                # This channel
-    ├── MEMORY.md                # Channel-specific memory
-    ├── log.jsonl                # Message history (no tool results)
-    ├── attachments/             # User-shared files
-    ├── scratch/                 # Your working directory
-    └── skills/                  # Channel-specific tools
+## Workspace
+- Skills: \`${workspacePath}/skills/\` (global) and \`${channelPath}/skills/\` (channel-specific)
+- Memory: \`${workspacePath}/MEMORY.md\` and \`${channelPath}/MEMORY.md\`
+- Events: \`${workspacePath}/events/\`
+- Log: \`${channelPath}/log.jsonl\`
+- Subagents: \`${workspacePath}/.pi/agents/\`
 
-## Skills (Custom CLI Tools)
-You can create reusable CLI tools for recurring tasks (email, APIs, data processing, etc.).
-
-### Creating Skills
-Store in \`${workspacePath}/skills/<name>/\` (global) or \`${channelPath}/skills/<name>/\` (channel-specific).
-Each skill directory needs a \`SKILL.md\` with YAML frontmatter:
-
-\`\`\`markdown
----
-name: skill-name
-description: Short description of what this skill does
----
-
-# Skill Name
-
-Usage instructions, examples, etc.
-Scripts are in: {baseDir}/
-\`\`\`
-
-\`name\` and \`description\` are required. Use \`{baseDir}\` as placeholder for the skill's directory path.
+## Skills
+Create reusable CLI tools in \`skills/\`. Each skill needs a \`SKILL.md\` with YAML frontmatter (\`name\`, \`description\`) and usage docs.
 
 ### Available Skills
 ${skills.length > 0 ? formatSkillsForPrompt(skills) : "(no skills installed yet)"}
-
-## Events
-You can schedule events that wake you up at specific times or when external things happen. Events are JSON files in \`${workspacePath}/events/\`.
-
-### Event Types
-
-**Immediate** - Triggers as soon as harness sees the file. Use in scripts/webhooks to signal external events.
-\`\`\`json
-{"type": "immediate", "channelId": "${channelId}", "text": "New GitHub issue opened"}
-\`\`\`
-
-**One-shot** - Triggers once at a specific time. Use for reminders.
-\`\`\`json
-{"type": "one-shot", "channelId": "${channelId}", "text": "Remind Mario about dentist", "at": "2025-12-15T09:00:00+01:00"}
-\`\`\`
-
-**Periodic** - Triggers on a cron schedule. Use for recurring tasks.
-\`\`\`json
-{"type": "periodic", "channelId": "${channelId}", "text": "Check inbox and summarize", "schedule": "0 9 * * 1-5", "timezone": "${Intl.DateTimeFormat().resolvedOptions().timeZone}"}
-\`\`\`
-
-### Cron Format
-\`minute hour day-of-month month day-of-week\`
-- \`0 9 * * *\` = daily at 9:00
-- \`0 9 * * 1-5\` = weekdays at 9:00
-- \`30 14 * * 1\` = Mondays at 14:30
-- \`0 0 1 * *\` = first of each month at midnight
-
-### Timezones
-All \`at\` timestamps must include offset (e.g., \`+01:00\`). Periodic events use IANA timezone names. The harness runs in ${Intl.DateTimeFormat().resolvedOptions().timeZone}. When users mention times without timezone, assume ${Intl.DateTimeFormat().resolvedOptions().timeZone}.
-
-### Creating Events
-Use unique filenames to avoid overwriting existing events. Include a timestamp or random suffix:
-\`\`\`bash
-cat > ${workspacePath}/events/dentist-reminder-$(date +%s).json << 'EOF'
-{"type": "one-shot", "channelId": "${channelId}", "text": "Dentist tomorrow", "at": "2025-12-14T09:00:00+01:00"}
-EOF
-\`\`\`
-Or check if file exists first before creating.
-
-### Managing Events
-- List: \`ls ${workspacePath}/events/\`
-- View: \`cat ${workspacePath}/events/foo.json\`
-- Delete/cancel: \`rm ${workspacePath}/events/foo.json\`
-
-### When Events Trigger
-You receive a message like:
-\`\`\`
-[EVENT:dentist-reminder.json:one-shot:2025-12-14T09:00:00+01:00] Dentist tomorrow
-\`\`\`
-Immediate and one-shot events auto-delete after triggering. Periodic events persist until you delete them.
-
-### Silent Completion
-For periodic events where there's nothing to report, respond with just \`[SILENT]\` (no other text). This deletes the status message and posts nothing to Slack. Use this to avoid spamming the channel when periodic checks find nothing actionable.
-
-### Debouncing
-When writing programs that create immediate events (email watchers, webhook handlers, etc.), always debounce. If 50 emails arrive in a minute, don't create 50 immediate events. Instead collect events over a window and create ONE immediate event summarizing what happened, or just signal "new activity, check inbox" rather than per-item events. Or simpler: use a periodic event to check for new items every N minutes instead of immediate events.
-
-### Limits
-Maximum 5 events can be queued. Don't create excessive immediate or periodic events.
-
-## Memory
-Write to MEMORY.md files to persist context across conversations.
-- Global (${workspacePath}/MEMORY.md): skills, preferences, project info
-- Channel (${channelPath}/MEMORY.md): channel-specific decisions, ongoing work
-Update when you learn something important or when asked to remember something.
-
-### Current Memory
-${memory}
-
-## System Configuration Log
-Maintain ${workspacePath}/SYSTEM.md to log all environment modifications:
-- Installed packages (apk add, npm install, pip install)
-- Environment variables set
-- Config files modified (~/.gitconfig, cron jobs, etc.)
-- Skill dependencies installed
-
-Update this file whenever you modify the environment. On fresh container, read it first to restore your setup.
-
-## Log Queries (for older history)
-Format: \`{"date":"...","ts":"...","user":"...","userName":"...","text":"...","isBot":false}\`
-The log contains user messages and your final responses (not tool calls/results).
-${isDocker ? "Install jq: apk add jq" : ""}
-
-\`\`\`bash
-# Recent messages
-tail -30 log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text}'
-
-# Search for specific topic
-grep -i "topic" log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text}'
-
-# Messages from specific user
-grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text}'
-\`\`\`
 
 ## Tools
 - bash: Run shell commands (primary tool). Install packages as needed.
@@ -404,8 +247,11 @@ grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text
 - write: Create/overwrite files
 - edit: Surgical file edits
 - attach: Share files to Slack
+- subagent: Delegate a bounded task to a workspace-defined child agent from .pi/agents/
 
 Each tool requires a "label" parameter (shown to user).
+
+**Note:** The "Current working directory" shown below refers to the host machine. Your view is \`/workspace\` inside the sandbox.
 `;
 }
 
@@ -514,9 +360,6 @@ function createRunner(
 	const executor = createExecutor(sandboxConfig, hostWorkspaceDir);
 	const workspacePath = executor.getWorkspacePath(hostWorkspaceDir);
 
-	// Create tools
-	const tools = createMomTools(executor);
-
 	// Create session manager and settings manager
 	// Use a fixed context.jsonl file per Slack thread (not timestamped like coding-agent)
 	const threadDir = threadTs === "dm" ? channelDir : join(channelDir, "threads", sanitizeThreadTs(threadTs));
@@ -574,20 +417,33 @@ function createRunner(
 
 	log.logInfo(`[${channelId}] Using thinking level ${selectedThinkingLevel}`);
 
+	let session: AgentSession | undefined;
+	let loadedExtensionPaths: string[] = extensionPaths ?? [];
+	const subagentTool = createSubagentTool({
+		executor,
+		sandboxConfig,
+		workspaceDir: hostWorkspaceDir,
+		threadDir,
+		sessionManager,
+		getCurrentModel: () => {
+			const activeModel = session?.model;
+			if (activeModel) {
+				return { provider: activeModel.provider, id: activeModel.id };
+			}
+			if (selectedModel) {
+				return { provider: selectedModel.provider, id: selectedModel.id };
+			}
+			return undefined;
+		},
+		getCurrentThinkingLevel: () => session?.thinkingLevel ?? selectedThinkingLevel,
+		getInheritedExtensionPaths: () => loadedExtensionPaths,
+	});
+	const tools = createMomTools(executor, [subagentTool]);
+
 	// Build initial system prompt (will be updated by extension via before_agent_start)
 	const agentsProfile = getAgentsProfile(channelDir);
-	const memory = getMemory(channelDir);
 	const skills = loadMomSkills(channelDir, workspacePath);
-	const systemPrompt = buildSystemPrompt(
-		workspacePath,
-		channelId,
-		agentsProfile,
-		memory,
-		sandboxConfig,
-		[],
-		[],
-		skills,
-	);
+	const systemPrompt = buildSystemPrompt(workspacePath, channelId, agentsProfile, sandboxConfig, [], [], skills);
 
 	// Create agent
 	const agent = new Agent({
@@ -626,7 +482,7 @@ function createRunner(
 	const baseToolsOverride = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
 
 	// Create AgentSession wrapper
-	const session = new AgentSession({
+	session = new AgentSession({
 		agent,
 		sessionManager,
 		settingsManager: settingsManager as any,
@@ -668,6 +524,8 @@ function createRunner(
 			log.logInfo(`[${channelId}] Registered provider: ${name}`);
 		}
 		extResult.runtime.pendingProviderRegistrations = [];
+
+		loadedExtensionPaths = extResult.extensions.map((extension) => extension.path);
 
 		// Update resource loader with loaded extensions before reload
 		resourceLoader.getExtensions = () => extResult;
@@ -886,15 +744,13 @@ function createRunner(
 				log.logInfo(`[${channelId}] Reloaded ${reloadedSession.messages.length} messages from context`);
 			}
 
-			// Update system prompt with fresh memory, channel/user info, and skills
+			// Update system prompt with fresh channel/user info and skills
 			const agentsProfile = getAgentsProfile(channelDir);
-			const memory = getMemory(channelDir);
 			const skills = loadMomSkills(channelDir, workspacePath);
 			const systemPrompt = buildSystemPrompt(
 				workspacePath,
 				channelId,
 				agentsProfile,
-				memory,
 				sandboxConfig,
 				ctx.channels,
 				ctx.users,
@@ -969,7 +825,7 @@ function createRunner(
 			};
 
 			// Log context info
-			log.logInfo(`Context sizes - system: ${systemPrompt.length} chars, memory: ${memory.length} chars`);
+			log.logInfo(`System prompt: ${systemPrompt.length} chars`);
 			log.logInfo(`Channels: ${ctx.channels.length}, Users: ${ctx.users.length}`);
 
 			// Build user message with timestamp and username prefix

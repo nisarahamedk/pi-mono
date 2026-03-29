@@ -2472,6 +2472,31 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Wait until the agent is idle and all queued AgentSession event processing is drained.
+	 *
+	 * Print/RPC callers need this because agent.prompt() can resolve before async extension
+	 * handlers triggered by late tool events (for example tool_execution_end) finish.
+	 */
+	async waitForSettled(): Promise<void> {
+		while (true) {
+			await this.agent.waitForIdle();
+			const eventQueue = this._agentEventQueue;
+			await eventQueue;
+			if (this._retryPromise) {
+				await this.waitForRetry();
+				continue;
+			}
+			if (this.isStreaming) {
+				continue;
+			}
+			if (eventQueue !== this._agentEventQueue) {
+				continue;
+			}
+			return;
+		}
+	}
+
 	/** Whether auto-retry is currently in progress */
 	get isRetrying(): boolean {
 		return this._retryPromise !== undefined;
