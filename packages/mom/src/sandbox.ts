@@ -341,9 +341,13 @@ async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox
 	await ensureHostBrowserRunning(parsedTarget.host, parsedTarget.port, hostBrowser);
 	let effectiveTarget = cdpTarget;
 
-	// In vibesilo networks, sandbox often can't directly resolve/reach host.docker.internal.
-	// Route through the proxy container when host CDP is requested.
-	if (parsedTarget.host === "host.docker.internal") {
+	// In vibesilo, a target like 127.0.0.1:9223 refers to the sandbox itself,
+	// not the host machine. For host CDP, route through the proxy container.
+	const needsProxyRelay =
+		parsedTarget.host === "host.docker.internal" ||
+		parsedTarget.host === "127.0.0.1" ||
+		parsedTarget.host === "localhost";
+	if (needsProxyRelay) {
 		const proxyName = await deriveProxyContainerName(sandbox.containerId);
 		if (!proxyName) {
 			const msg = "Could not derive vibesilo proxy container name for host browser relay";
@@ -352,8 +356,12 @@ async function ensureVibesiloHostBrowserBridge(hostWorkspaceDir: string, sandbox
 			return;
 		}
 		const relayPort = parsedTarget.port + 10000;
+		const relayTargetHost =
+			parsedTarget.host === "127.0.0.1" || parsedTarget.host === "localhost"
+				? "host.docker.internal"
+				: parsedTarget.host;
 		try {
-			await ensureProxyCdpRelay(proxyName, parsedTarget.host, parsedTarget.port, relayPort);
+			await ensureProxyCdpRelay(proxyName, relayTargetHost, parsedTarget.port, relayPort);
 			effectiveTarget = `${proxyName}:${relayPort}`;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
