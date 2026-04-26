@@ -11,6 +11,7 @@
 - Fixed subagent sandbox exec environment to expose `WORKSPACE=/workspace` and added tool-surface diagnostics for child MCP/judge investigations
 - Fixed subagent result persistence so `result.json` stores the full child summary while parent/tool output remains truncated for display
 - Fixed subagent result and artifact paths to use the selected execution surface path semantics (`/workspace` in sandboxed runs) instead of leaking host filesystem paths
+- Fixed vibesilo host-browser CDP bootstrap to use a real Playwright CDP probe, log proxy relay failures, wait for the reused Chrome profile to stabilize after restart, only delete the disposable mom profile as a last-resort recovery before initializing `upwork-cli`, and avoid running the expensive Upwork/CDP bootstrap for unrelated sandbox commands or simple `upwork-cli` path lookups
 
 ## [0.61.1] - 2026-03-20
 

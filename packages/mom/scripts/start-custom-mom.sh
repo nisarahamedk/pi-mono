@@ -40,7 +40,7 @@ fi
 cleanup_existing_runtime() {
 	echo "Cleaning existing mom runtime for socket: $MOM_RPC_SOCKET"
 
-	local pids
+	local pids browser_pids
 	pids="$({ ps -Ao pid=,command= | grep -F -- "$MOM_RPC_SOCKET" | grep -F -- "packages/mom/" | grep -v grep; } || true)"
 	if [[ -n "$pids" ]]; then
 		echo "$pids" | awk '{print $1}' | xargs kill 2>/dev/null || true
@@ -48,6 +48,17 @@ cleanup_existing_runtime() {
 		pids="$({ ps -Ao pid=,command= | grep -F -- "$MOM_RPC_SOCKET" | grep -F -- "packages/mom/" | grep -v grep; } || true)"
 		if [[ -n "$pids" ]]; then
 			echo "$pids" | awk '{print $1}' | xargs kill -9 2>/dev/null || true
+		fi
+	fi
+
+	browser_pids="$({ ps -Ao pid=,command= | grep -F -- "$HOME/.mom-upwork-cdp-profile" | grep -F -- "Google Chrome" | grep -v grep; } || true)"
+	if [[ -n "$browser_pids" ]]; then
+		echo "Killing dedicated host CDP browser using $HOME/.mom-upwork-cdp-profile"
+		echo "$browser_pids" | awk '{print $1}' | xargs kill 2>/dev/null || true
+		sleep 2
+		browser_pids="$({ ps -Ao pid=,command= | grep -F -- "$HOME/.mom-upwork-cdp-profile" | grep -F -- "Google Chrome" | grep -v grep; } || true)"
+		if [[ -n "$browser_pids" ]]; then
+			echo "$browser_pids" | awk '{print $1}' | xargs kill -9 2>/dev/null || true
 		fi
 	fi
 
