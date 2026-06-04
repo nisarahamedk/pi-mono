@@ -52,11 +52,20 @@ ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
 
 # Install browser automation CLI.
 # Note: use host-browser CDP bridge (127.0.0.1:<port>) for tools that require local CDP.
-ARG UPWORK_CLI_TGZ=upwork-cli.tgz
-RUN --mount=type=bind,source=packages/mom/docker,target=/tmp/dockerctx \
-    npm install -g agent-browser \
- && if [ -f "/tmp/dockerctx/${UPWORK_CLI_TGZ}" ]; then \
-      npm install -g "/tmp/dockerctx/${UPWORK_CLI_TGZ}"; \
+ARG UPWORK_CLI_REF=main
+ARG UPWORK_CLI_CACHE_BUST=0
+RUN --mount=type=secret,id=github_token,required=false \
+    echo "Installing upwork-cli from github.com/nisarahamedk/upwork-cli#${UPWORK_CLI_REF} cache-bust=${UPWORK_CLI_CACHE_BUST}" \
+ && npm install -g agent-browser \
+ && if [ -f /run/secrets/github_token ]; then \
+      GITHUB_TOKEN="$(cat /run/secrets/github_token)"; \
+      git clone --depth 1 --branch "${UPWORK_CLI_REF}" "https://x-access-token:${GITHUB_TOKEN}@github.com/nisarahamedk/upwork-cli.git" /tmp/upwork-cli; \
     else \
-      echo "No ${UPWORK_CLI_TGZ} found in packages/mom/docker; skipping upwork-cli install"; \
-    fi
+      git clone --depth 1 --branch "${UPWORK_CLI_REF}" https://github.com/nisarahamedk/upwork-cli.git /tmp/upwork-cli; \
+    fi \
+ && cd /tmp/upwork-cli \
+ && pnpm install --frozen-lockfile \
+ && pnpm run build \
+ && npm pack --pack-destination /tmp \
+ && npm install -g /tmp/upwork-cli-*.tgz \
+ && rm -rf /tmp/upwork-cli /tmp/upwork-cli-*.tgz
