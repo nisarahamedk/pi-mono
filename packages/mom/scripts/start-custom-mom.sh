@@ -86,6 +86,7 @@ cd "$REPO_ROOT"
 exec "$TSX_BIN" packages/mom/src/main.ts \
   --sandbox="$MOM_SANDBOX" \
   --rpc-socket "$MOM_RPC_SOCKET" \
+  --extension /Users/rootclaw/Projects/mom-workspace/.pi/extensions/minimax-m3.ts \
   --extension /Users/rootclaw/Projects/mom-workspace/.pi/extensions/upwork-coach.ts \
   --extension /Users/rootclaw/Projects/mom-workspace/.pi/extensions/mcp-path-bridge.ts \
   "$WORKSPACE_DIR"

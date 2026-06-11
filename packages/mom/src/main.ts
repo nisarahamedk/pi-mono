@@ -175,19 +175,34 @@ function createSlackContext(
 	let accumulatedText = "";
 	let isWorking = true;
 	const workingIndicator = " ...";
-	const SLACK_SAFE_MAIN_LIMIT = 30000;
-	const SLACK_THREAD_CHUNK = 35000;
+	const SLACK_SAFE_MAIN_BYTES = 12000;
+	const SLACK_THREAD_CHUNK_BYTES = 12000;
 	let updatePromise = Promise.resolve();
 
-	const splitForSlack = (text: string, limit: number): string[] => {
-		if (text.length <= limit) return [text];
-		const parts: string[] = [];
-		let i = 0;
-		while (i < text.length) {
-			parts.push(text.slice(i, i + limit));
-			i += limit;
+	const byteLength = (text: string): number => Buffer.byteLength(text, "utf8");
+
+	const takeSlackBytes = (text: string, maxBytes: number): { head: string; tail: string } => {
+		if (byteLength(text) <= maxBytes) return { head: text, tail: "" };
+		let low = 0;
+		let high = text.length;
+		while (low < high) {
+			const mid = Math.ceil((low + high) / 2);
+			if (byteLength(text.slice(0, mid)) <= maxBytes) low = mid;
+			else high = mid - 1;
 		}
-		return parts;
+		return { head: text.slice(0, low), tail: text.slice(low) };
+	};
+
+	const splitForSlack = (text: string, maxBytes: number): string[] => {
+		const parts: string[] = [];
+		let remaining = text;
+		while (remaining.length > 0) {
+			const { head, tail } = takeSlackBytes(remaining, maxBytes);
+			if (head.length === 0) break;
+			parts.push(head);
+			remaining = tail;
+		}
+		return parts.length > 0 ? parts : [""];
 	};
 
 	const user = slack.getUser(event.user);
@@ -219,16 +234,20 @@ function createSlackContext(
 			updatePromise = updatePromise.then(async () => {
 				let overflow = "";
 				const next = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				if (next.length <= SLACK_SAFE_MAIN_LIMIT) {
+				if (byteLength(next) <= SLACK_SAFE_MAIN_BYTES) {
 					accumulatedText = next;
 				} else {
 					const separator = accumulatedText ? "\n" : "";
-					const budget = Math.max(0, SLACK_SAFE_MAIN_LIMIT - accumulatedText.length - separator.length);
-					const head = text.slice(0, budget);
-					overflow = text.slice(budget);
+					const marker = isDm ? "\n\n_(continued)_" : "";
+					const budget = Math.max(
+						0,
+						SLACK_SAFE_MAIN_BYTES - byteLength(accumulatedText) - byteLength(separator) - byteLength(marker),
+					);
+					const { head, tail } = takeSlackBytes(text, budget);
+					overflow = tail;
 					accumulatedText = accumulatedText ? `${accumulatedText}${separator}${head}` : head;
 					if (!accumulatedText.includes("_(continued in thread)_")) {
-						accumulatedText = `${accumulatedText}\n\n_(continued in thread)_`;
+						accumulatedText = `${accumulatedText}${marker}`;
 					}
 				}
 
@@ -243,7 +262,7 @@ function createSlackContext(
 				}
 
 				if (overflow.length > 0) {
-					for (const part of splitForSlack(overflow, SLACK_THREAD_CHUNK)) {
+					for (const part of splitForSlack(overflow, SLACK_THREAD_CHUNK_BYTES)) {
 						if (isDm) {
 							const ts = await slack.postMessage(event.channel, part);
 							threadMessageTs.push(ts);
@@ -263,10 +282,13 @@ function createSlackContext(
 
 		replaceMessage: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
-				const parts = splitForSlack(text, SLACK_THREAD_CHUNK);
+				const marker = isDm ? "\n\n_(continued)_" : "";
+				const mainBudget = SLACK_SAFE_MAIN_BYTES - byteLength(marker);
+				const { head, tail } = takeSlackBytes(text, mainBudget);
+				const parts = tail.length > 0 ? [head, ...splitForSlack(tail, SLACK_THREAD_CHUNK_BYTES)] : [head];
 				accumulatedText = parts[0] ?? "";
-				if (accumulatedText.length > SLACK_SAFE_MAIN_LIMIT) {
-					accumulatedText = `${accumulatedText.slice(0, SLACK_SAFE_MAIN_LIMIT)}\n\n_(continued in thread)_`;
+				if (parts.length > 1) {
+					accumulatedText = `${accumulatedText}${marker}`;
 				}
 				const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
 				if (messageTs) {
@@ -294,14 +316,16 @@ function createSlackContext(
 
 		respondInThread: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
-				if (isDm) {
-					const ts = await slack.postMessage(event.channel, text);
-					threadMessageTs.push(ts);
-					return;
-				}
+				for (const part of splitForSlack(text, SLACK_THREAD_CHUNK_BYTES)) {
+					if (isDm) {
+						const ts = await slack.postMessage(event.channel, part);
+						threadMessageTs.push(ts);
+						continue;
+					}
 
-				const ts = await slack.postInThread(event.channel, threadTs, text);
-				threadMessageTs.push(ts);
+					const ts = await slack.postInThread(event.channel, threadTs, part);
+					threadMessageTs.push(ts);
+				}
 			});
 			await updatePromise;
 		},

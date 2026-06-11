@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import type { Api, ImageContent, Model } from "@mariozechner/pi-ai";
+import { type Api, type ImageContent, type Model, modelsAreEqual } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	AuthStorage,
@@ -517,13 +517,22 @@ function createRunner(
 			log.logWarning(`[${channelId}] Failed to load extension "${path}": ${error}`);
 		}
 
-		// Apply pending provider registrations to model registry
-		// This MUST happen before model resolution
+		// Apply pending provider registrations to model registry before binding extensions.
+		// Provider extensions can add models used by mom's workspace settings.
 		for (const { name, config } of extResult.runtime.pendingProviderRegistrations) {
 			modelRegistry.registerProvider(name, config);
 			log.logInfo(`[${channelId}] Registered provider: ${name}`);
 		}
 		extResult.runtime.pendingProviderRegistrations = [];
+
+		const configuredModel = resolveModelFromConfig(
+			modelRegistry,
+			settingsProvider && settingsModelId ? { provider: settingsProvider, modelId: settingsModelId } : undefined,
+		);
+		if (configuredModel && (!session.model || !modelsAreEqual(session.model, configuredModel))) {
+			await session.setModel(configuredModel);
+			log.logInfo(`[${channelId}] Using configured model ${configuredModel.provider}/${configuredModel.id}`);
+		}
 
 		loadedExtensionPaths = extResult.extensions.map((extension) => extension.path);
 
@@ -911,11 +920,7 @@ function createRunner(
 					}
 				} else if (finalText.trim()) {
 					try {
-						const mainText =
-							finalText.length > SLACK_MAX_LENGTH
-								? `${finalText.substring(0, SLACK_MAX_LENGTH - 50)}\n\n_(see thread for full response)_`
-								: finalText;
-						await ctx.replaceMessage(mainText);
+						await ctx.replaceMessage(finalText);
 					} catch (err) {
 						const errMsg = err instanceof Error ? err.message : String(err);
 						log.logWarning("Failed to replace message with final text", errMsg);
