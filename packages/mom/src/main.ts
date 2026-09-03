@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { mkdir, writeFile } from "fs/promises";
 import { join, resolve } from "path";
 import { type AgentRunner, getOrCreateRunner } from "./agent.js";
 import { downloadChannel } from "./download.js";
@@ -175,11 +176,14 @@ function createSlackContext(
 	let accumulatedText = "";
 	let isWorking = true;
 	const workingIndicator = " ...";
-	const SLACK_SAFE_MAIN_BYTES = 12000;
-	const SLACK_THREAD_CHUNK_BYTES = 12000;
+	const SLACK_SAFE_MAIN_BYTES = 3000;
+	const SLACK_THREAD_CHUNK_BYTES = 3000;
+	const SLACK_FILE_UPLOAD_THRESHOLD_BYTES = 3000;
 	let updatePromise = Promise.resolve();
 
 	const byteLength = (text: string): number => Buffer.byteLength(text, "utf8");
+	const slackMainContentBudget = (suffix = ""): number =>
+		Math.max(0, SLACK_SAFE_MAIN_BYTES - byteLength(suffix) - (isWorking ? byteLength(workingIndicator) : 0));
 
 	const takeSlackBytes = (text: string, maxBytes: number): { head: string; tail: string } => {
 		if (byteLength(text) <= maxBytes) return { head: text, tail: "" };
@@ -234,14 +238,14 @@ function createSlackContext(
 			updatePromise = updatePromise.then(async () => {
 				let overflow = "";
 				const next = accumulatedText ? `${accumulatedText}\n${text}` : text;
-				if (byteLength(next) <= SLACK_SAFE_MAIN_BYTES) {
+				if (byteLength(next) <= slackMainContentBudget()) {
 					accumulatedText = next;
 				} else {
 					const separator = accumulatedText ? "\n" : "";
 					const marker = isDm ? "\n\n_(continued)_" : "";
 					const budget = Math.max(
 						0,
-						SLACK_SAFE_MAIN_BYTES - byteLength(accumulatedText) - byteLength(separator) - byteLength(marker),
+						slackMainContentBudget(`${separator}${marker}`) - byteLength(accumulatedText),
 					);
 					const { head, tail } = takeSlackBytes(text, budget);
 					overflow = tail;
@@ -282,8 +286,37 @@ function createSlackContext(
 
 		replaceMessage: async (text: string) => {
 			updatePromise = updatePromise.then(async () => {
+				if (byteLength(text) > SLACK_FILE_UPLOAD_THRESHOLD_BYTES) {
+					const notice = "Response was too long for Slack. Attached the full response as a Markdown file.";
+					const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+					const artifactDir = join(workingDir, "artifacts", "slack-responses");
+					const fileName = `mom-response-${event.channel}-${threadTs}-${timestamp}.md`.replace(
+						/[^a-zA-Z0-9._-]/g,
+						"-",
+					);
+					const filePath = join(artifactDir, fileName);
+
+					try {
+						await mkdir(artifactDir, { recursive: true });
+						await writeFile(filePath, text, "utf8");
+						accumulatedText = notice;
+						const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+						if (messageTs) {
+							await slack.updateMessage(event.channel, messageTs, displayText);
+						} else if (isDm) {
+							messageTs = await slack.postMessage(event.channel, displayText);
+						} else {
+							messageTs = await slack.postInThread(event.channel, threadTs, displayText);
+						}
+						await slack.uploadFile(event.channel, filePath, fileName, isDm ? undefined : threadTs);
+						return;
+					} catch (err) {
+						log.logWarning("Failed to upload long Slack response; falling back to chunked messages", String(err));
+					}
+				}
+
 				const marker = isDm ? "\n\n_(continued)_" : "";
-				const mainBudget = SLACK_SAFE_MAIN_BYTES - byteLength(marker);
+				const mainBudget = slackMainContentBudget(marker);
 				const { head, tail } = takeSlackBytes(text, mainBudget);
 				const parts = tail.length > 0 ? [head, ...splitForSlack(tail, SLACK_THREAD_CHUNK_BYTES)] : [head];
 				accumulatedText = parts[0] ?? "";
@@ -358,7 +391,9 @@ function createSlackContext(
 			updatePromise = updatePromise.then(async () => {
 				isWorking = working;
 				if (messageTs) {
-					const displayText = isWorking ? accumulatedText + workingIndicator : accumulatedText;
+					const displayText = isWorking
+						? takeSlackBytes(accumulatedText, slackMainContentBudget()).head + workingIndicator
+						: takeSlackBytes(accumulatedText, SLACK_SAFE_MAIN_BYTES).head;
 					await slack.updateMessage(event.channel, messageTs, displayText);
 				}
 			});

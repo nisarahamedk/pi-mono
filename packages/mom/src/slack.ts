@@ -131,7 +131,7 @@ class ChannelQueue {
 // SlackBot
 // ============================================================================
 
-const SLACK_TEXT_RETRY_MAX_BYTES = 28000;
+const SLACK_TEXT_RETRY_MAX_BYTES = 3000;
 
 function truncateToSlackBytes(text: string, maxBytes = SLACK_TEXT_RETRY_MAX_BYTES): string {
 	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;

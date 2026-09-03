@@ -9,6 +9,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 	echo "  MOM_SANDBOX      Sandbox mode (default: vibesilo)"
 	echo "  MOM_RPC_SOCKET   RPC socket path (default: <workspace>/.mom.sock)"
 	echo "  MOM_SKIP_CLEAN   Set to 1 to skip pre-launch cleanup"
+	echo "  PI_WEB_ACCESS_EXTENSION  Extension entry point (default: global npm pi-web-access package)"
 	exit 0
 fi
 
@@ -20,6 +21,8 @@ MOM_ENV_FILE="${MOM_ENV_FILE:-$HOME/.config/mom/slack.env}"
 MOM_SANDBOX="${MOM_SANDBOX:-vibesilo}"
 MOM_RPC_SOCKET="${MOM_RPC_SOCKET:-$WORKSPACE_DIR/.mom.sock}"
 MOM_SKIP_CLEAN="${MOM_SKIP_CLEAN:-0}"
+NPM_GLOBAL_ROOT="$(npm root -g)"
+PI_WEB_ACCESS_EXTENSION="${PI_WEB_ACCESS_EXTENSION:-$NPM_GLOBAL_ROOT/pi-web-access/index.ts}"
 TSX_BIN="$REPO_ROOT/node_modules/.bin/tsx"
 
 if [[ -f "$MOM_ENV_FILE" ]]; then
@@ -34,6 +37,12 @@ fi
 if [[ ! -x "$TSX_BIN" ]]; then
 	echo "Error: missing tsx executable: $TSX_BIN" >&2
 	echo "Run: cd $REPO_ROOT && npm install" >&2
+	exit 1
+fi
+
+if [[ ! -f "$PI_WEB_ACCESS_EXTENSION" ]]; then
+	echo "Error: missing pi-web-access extension: $PI_WEB_ACCESS_EXTENSION" >&2
+	echo "Install it with: npm install -g pi-web-access@0.27.0" >&2
 	exit 1
 fi
 
@@ -86,7 +95,6 @@ cd "$REPO_ROOT"
 exec "$TSX_BIN" packages/mom/src/main.ts \
   --sandbox="$MOM_SANDBOX" \
   --rpc-socket "$MOM_RPC_SOCKET" \
-  --extension /Users/rootclaw/Projects/mom-workspace/.pi/extensions/minimax-m3.ts \
   --extension /Users/rootclaw/Projects/mom-workspace/.pi/extensions/upwork-coach.ts \
-  --extension /Users/rootclaw/Projects/mom-workspace/.pi/extensions/mcp-path-bridge.ts \
+  --extension "$PI_WEB_ACCESS_EXTENSION" \
   "$WORKSPACE_DIR"

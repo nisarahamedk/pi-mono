@@ -686,7 +686,6 @@ function createRunner(
 
 				if (text.trim()) {
 					log.logResponse(logCtx, text);
-					queue.enqueueMessage(text, "main", "response main");
 				}
 			}
 		} else if (event.type === "auto_compaction_start") {
@@ -709,21 +708,35 @@ function createRunner(
 		}
 	});
 
-	// Slack message limit
-	const SLACK_MAX_LENGTH = 40000;
+	// Slack message limit. Keep this below Slack's documented max and byte-based;
+	// main/thread adapters may add status suffixes before posting.
+	const SLACK_MAX_BYTES = 3000;
+	const slackByteLength = (text: string): number => Buffer.byteLength(text, "utf8");
+	const takeSlackBytes = (text: string, maxBytes: number): { head: string; tail: string } => {
+		if (slackByteLength(text) <= maxBytes) return { head: text, tail: "" };
+		let low = 0;
+		let high = text.length;
+		while (low < high) {
+			const mid = Math.ceil((low + high) / 2);
+			if (slackByteLength(text.slice(0, mid)) <= maxBytes) low = mid;
+			else high = mid - 1;
+		}
+		return { head: text.slice(0, low), tail: text.slice(low) };
+	};
 	const splitForSlack = (text: string): string[] => {
-		if (text.length <= SLACK_MAX_LENGTH) return [text];
+		if (slackByteLength(text) <= SLACK_MAX_BYTES) return [text];
 		const parts: string[] = [];
 		let remaining = text;
 		let partNum = 1;
 		while (remaining.length > 0) {
-			const chunk = remaining.substring(0, SLACK_MAX_LENGTH - 50);
-			remaining = remaining.substring(SLACK_MAX_LENGTH - 50);
-			const suffix = remaining.length > 0 ? `\n_(continued ${partNum}...)_` : "";
-			parts.push(chunk + suffix);
+			const suffix = remaining.length > SLACK_MAX_BYTES ? `\n_(continued ${partNum}...)_` : "";
+			const { head, tail } = takeSlackBytes(remaining, SLACK_MAX_BYTES - slackByteLength(suffix));
+			if (head.length === 0) break;
+			remaining = tail;
+			parts.push(`${head}${remaining.length > 0 ? suffix : ""}`);
 			partNum++;
 		}
-		return parts;
+		return parts.length > 0 ? parts : [""];
 	};
 
 	return {
